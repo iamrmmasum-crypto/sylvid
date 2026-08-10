@@ -1,3 +1,4 @@
+import { kv } from '@vercel/kv'
 import { NextRequest, NextResponse } from 'next/server'
 
 // ============================================================
@@ -30,104 +31,239 @@ interface QueuedEvent {
 }
 
 // ============================================================
-// GLOBAL STATE (persists across requests on same instance)
+// CONSTANTS
 // ============================================================
 
-const globalForStore = globalThis as unknown as {
-  peers?: Map<string, PeerInfo>
-  events?: Map<string, QueuedEvent[]>
-  bannedUsernames?: Set<string>
-  activeCalls?: Map<string, ActiveCall>
-  callCounter?: number
-}
-
-if (!globalForStore.peers) {
-  globalForStore.peers = new Map()
-  globalForStore.events = new Map()
-  globalForStore.bannedUsernames = new Set()
-  globalForStore.activeCalls = new Map()
-  globalForStore.callCounter = 0
-}
-
-const peers = globalForStore.peers
-const events = globalForStore.events
-const bannedUsernames = globalForStore.bannedUsernames
-const activeCalls = globalForStore.activeCalls
 const ADMIN_SECRET = 'admin2024'
+const PEER_TTL = 30       // seconds — peer considered stale if no heartbeat
+const EVENT_TTL = 300      // 5 min — events auto-expire
+const P = 'sylvid'         // Redis key prefix
 
-function pushEvent(userId: string, type: string, data: any) {
-  if (!events.has(userId)) events.set(userId, [])
-  events.get(userId)!.push({ type, data, ts: Date.now() })
+// ============================================================
+// KEY HELPERS
+// ============================================================
+
+const pk = (id: string) => `${P}:peer:${id}`
+const ek = (id: string) => `${P}:events:${id}`
+const sk = (id: string) => `${P}:seen:${id}`
+
+// ============================================================
+// REDIS HELPERS
+// ============================================================
+
+async function pushEvent(userId: string, type: string, data: any) {
+  const ev: QueuedEvent = { type, data, ts: Date.now() }
+  const pipe = kv.pipeline()
+  pipe.rpush(ek(userId), JSON.stringify(ev))
+  pipe.expire(ek(userId), EVENT_TTL)
+  await pipe.exec()
 }
 
-function broadcastEvent(type: string, data: any, excludeId?: string) {
-  for (const [id] of peers) {
-    if (id !== excludeId) pushEvent(id, type, data)
+async function getEvents(userId: string, since: number): Promise<QueuedEvent[]> {
+  const raw = (await kv.lrange(ek(userId), 0, -1)) as string[] | null
+  if (!raw || raw.length === 0) return []
+  const all: QueuedEvent[] = raw.map((s) => JSON.parse(s))
+  // Client deduplicates by timestamp, so just return filtered results
+  return all.filter((e) => e.ts > since)
+}
+
+async function setPeer(id: string, peer: PeerInfo) {
+  const pipe = kv.pipeline()
+  pipe.set(pk(id), JSON.stringify(peer))
+  pipe.sadd(`${P}:peers`, id)
+  pipe.set(sk(id), Date.now(), { ex: PEER_TTL })
+  await pipe.exec()
+}
+
+async function getPeer(id: string): Promise<PeerInfo | null> {
+  const raw = await kv.get(pk(id))
+  return raw ? (JSON.parse(raw as string) as PeerInfo) : null
+}
+
+async function deletePeer(id: string) {
+  const pipe = kv.pipeline()
+  pipe.del(pk(id), ek(id), sk(id))
+  pipe.srem(`${P}:peers`, id)
+  await pipe.exec()
+}
+
+async function getAllPeers(): Promise<PeerInfo[]> {
+  const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
+  if (!ids || ids.length === 0) return []
+
+  // Pipeline fetch all peer data in one round-trip
+  const pipe = kv.pipeline()
+  for (const id of ids) pipe.get(pk(id))
+  const results = (await pipe.exec()) as (string | null)[]
+
+  const peers: PeerInfo[] = []
+  const stale: string[] = []
+  for (let i = 0; i < ids.length; i++) {
+    if (results[i]) {
+      peers.push(JSON.parse(results[i] as string))
+    } else {
+      stale.push(ids[i])
+    }
   }
+  // Clean orphaned index entries
+  if (stale.length > 0) await kv.srem(`${P}:peers`, ...stale)
+  return peers
 }
 
-function broadcastPeerList() {
-  const list = Array.from(peers.values()).map((p) => ({
+async function touchPeer(id: string) {
+  await kv.set(sk(id), Date.now(), { ex: PEER_TTL })
+}
+
+async function cleanStalePeers(): Promise<boolean> {
+  const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
+  if (!ids || ids.length === 0) return false
+
+  let changed = false
+  for (const id of ids) {
+    const seen = await kv.get(sk(id))
+    if (!seen) {
+      const peer = await getPeer(id)
+      if (peer) {
+        if (peer.inCallWith) await endCallForPeer(id)
+        changed = true
+      }
+      await deletePeer(id)
+    }
+  }
+  return changed
+}
+
+// --- Banned users ---
+
+async function addBan(username: string) {
+  await kv.sadd(`${P}:banned`, username.toLowerCase())
+}
+async function removeBan(username: string) {
+  await kv.srem(`${P}:banned`, username.toLowerCase())
+}
+async function isBanned(username: string): Promise<boolean> {
+  return (await kv.sismember(`${P}:banned`, username.toLowerCase())) === 1
+}
+async function getAllBanned(): Promise<string[]> {
+  return ((await kv.smembers(`${P}:banned`)) as string[] | null) || []
+}
+
+// --- Active calls ---
+
+async function addActiveCall(call: ActiveCall) {
+  const pipe = kv.pipeline()
+  pipe.sadd(`${P}:calls`, call.id)
+  pipe.set(`${P}:call:${call.id}`, JSON.stringify(call))
+  await pipe.exec()
+}
+async function removeActiveCall(callId: string) {
+  const pipe = kv.pipeline()
+  pipe.del(`${P}:call:${callId}`)
+  pipe.srem(`${P}:calls`, callId)
+  await pipe.exec()
+}
+async function getAllActiveCalls(): Promise<ActiveCall[]> {
+  const ids = ((await kv.smembers(`${P}:calls`)) as string[] | null) || []
+  if (ids.length === 0) return []
+  const pipe = kv.pipeline()
+  for (const id of ids) pipe.get(`${P}:call:${id}`)
+  const results = (await pipe.exec()) as (string | null)[]
+  const calls: ActiveCall[] = []
+  const stale: string[] = []
+  for (let i = 0; i < ids.length; i++) {
+    if (results[i]) calls.push(JSON.parse(results[i] as string))
+    else stale.push(ids[i])
+  }
+  if (stale.length > 0) await kv.srem(`${P}:calls`, ...stale)
+  return calls
+}
+async function generateCallId(): Promise<string> {
+  const c = await kv.incr(`${P}:cc`)
+  return `call_${c}_${Date.now()}`
+}
+
+// ============================================================
+// BROADCAST HELPERS
+// ============================================================
+
+async function broadcastEvent(type: string, data: any, excludeId?: string) {
+  const peers = await getAllPeers()
+  if (peers.length === 0) return
+  const pipe = kv.pipeline()
+  const now = Date.now()
+  for (const peer of peers) {
+    if (peer.id !== excludeId) {
+      pipe.rpush(ek(peer.id), JSON.stringify({ type, data, ts: now }))
+      pipe.expire(ek(peer.id), EVENT_TTL)
+    }
+  }
+  await pipe.exec()
+}
+
+async function broadcastPeerList() {
+  const peers = await getAllPeers()
+  const list = peers.map((p) => ({
     id: p.id, username: p.username, device: p.device,
     inCall: !!p.inCallWith, connectedAt: p.connectedAt,
   }))
-  broadcastEvent('peer-list', { peers: list })
-  broadcastAdminSnapshot()
+  await broadcastEvent('peer-list', { peers: list })
+  await broadcastAdminSnapshot()
 }
 
-function broadcastAdminSnapshot() {
+async function broadcastAdminSnapshot() {
+  const peers = await getAllPeers()
+  const activeCalls = await getAllActiveCalls()
+  const bannedUsernames = await getAllBanned()
+
   const snapshot = {
-    peers: Array.from(peers.values()).map((p) => ({
+    peers: peers.map((p) => ({
       id: p.id, username: p.username, device: p.device,
       isAdmin: p.isAdmin, inCallWith: p.inCallWith,
       callStartedAt: p.callStartedAt, connectedAt: p.connectedAt,
-      isBanned: bannedUsernames.has(p.username.replace(/^ADMIN: /, '')),
+      isBanned: bannedUsernames.includes(p.username.replace(/^ADMIN: /, '').toLowerCase()),
     })),
-    activeCalls: Array.from(activeCalls.values()),
-    bannedUsernames: Array.from(bannedUsernames),
-    bannedCount: bannedUsernames.size,
-    totalConnected: peers.size,
+    activeCalls,
+    bannedUsernames,
+    bannedCount: bannedUsernames.length,
+    totalConnected: peers.length,
   }
-  broadcastEvent('admin-snapshot', snapshot)
+  await broadcastEvent('admin-snapshot', snapshot)
 }
 
-function endCallForPeer(peerId: string) {
-  const peer = peers.get(peerId)
+async function endCallForPeer(peerId: string) {
+  const peer = await getPeer(peerId)
   if (!peer || !peer.inCallWith) return
+
   const otherId = peer.inCallWith
-  const other = peers.get(otherId)
-  pushEvent(peerId, 'call-ended', { fromId: otherId })
-  if (other) pushEvent(otherId, 'call-ended', { fromId: peerId })
-  if (peer) { peer.inCallWith = null; peer.callStartedAt = null }
-  if (other) { other.inCallWith = null; other.callStartedAt = null }
-  for (const [cid, call] of activeCalls) {
+  const other = await getPeer(otherId)
+
+  await pushEvent(peerId, 'call-ended', { fromId: otherId })
+  if (other) await pushEvent(otherId, 'call-ended', { fromId: peerId })
+
+  if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await kv.set(pk(peerId), JSON.stringify(peer)) }
+  if (other) { other.inCallWith = null; other.callStartedAt = null; await kv.set(pk(otherId), JSON.stringify(other)) }
+
+  const calls = await getAllActiveCalls()
+  for (const call of calls) {
     if (
       (call.callerId === peerId && call.calleeId === otherId) ||
       (call.callerId === otherId && call.calleeId === peerId)
-    ) { activeCalls.delete(cid); break }
+    ) { await removeActiveCall(call.id); break }
   }
-  broadcastAdminSnapshot()
+  await broadcastAdminSnapshot()
 }
 
-function generateCallId(): string {
-  return `call_${++globalForStore.callCounter!}_${Date.now()}`
-}
+// ============================================================
+// KV HEALTH CHECK
+// ============================================================
 
-const lastSeen = new Map<string, number>()
+const kvReady = !!process.env.KV_REST_API_URL || !!process.env.KV_URL || !!process.env.KVC_REST_API_URL
 
-function cleanStale() {
-  const now = Date.now()
-  for (const [id, ts] of lastSeen) {
-    if (now - ts > 15000) {
-      const peer = peers.get(id)
-      if (peer) {
-        if (peer.inCallWith) endCallForPeer(id)
-        peers.delete(id)
-        events.delete(id)
-        lastSeen.delete(id)
-      }
-    }
-  }
+function kvError() {
+  return NextResponse.json({
+    error: 'Vercel KV not linked. Go to: Vercel Dashboard → Storage → Create KV Store → Link to project → Redeploy.',
+    setup: true,
+  }, { status: 503 })
 }
 
 // ============================================================
@@ -135,138 +271,150 @@ function cleanStale() {
 // ============================================================
 
 export async function POST(req: NextRequest) {
+  if (!kvReady) return kvError()
+
   try {
     const body = await req.json()
     const { userId, type, data } = body
     if (!userId || !type) return NextResponse.json({ error: 'Missing userId or type' }, { status: 400 })
 
-    lastSeen.set(userId, Date.now())
-    cleanStale()
+    await touchPeer(userId)
+    const stale = await cleanStalePeers()
 
     switch (type) {
       case 'admin-register': {
         if (data.secret !== ADMIN_SECRET) {
-          pushEvent(userId, 'admin-rejected', { reason: 'Invalid admin secret' })
+          await pushEvent(userId, 'admin-rejected', { reason: 'Invalid admin secret' })
           break
         }
-        peers.set(userId, {
+        await setPeer(userId, {
           id: userId, username: `ADMIN: ${data.username}`, device: 'web',
           isAdmin: true, connectedAt: Date.now(), inCallWith: null, callStartedAt: null,
         })
-        pushEvent(userId, 'admin-registered', { id: userId, username: `ADMIN: ${data.username}` })
-        broadcastPeerList()
+        await pushEvent(userId, 'admin-registered', { id: userId, username: `ADMIN: ${data.username}` })
+        await broadcastPeerList()
         break
       }
 
       case 'register': {
         const { username } = data
-        if (bannedUsernames.has(username.toLowerCase())) {
-          pushEvent(userId, 'banned', { reason: 'You have been banned' })
+        if (await isBanned(username)) {
+          await pushEvent(userId, 'banned', { reason: 'You have been banned' })
           break
         }
-        peers.set(userId, {
+        await setPeer(userId, {
           id: userId, username, device: data.device || 'web',
           isAdmin: false, connectedAt: Date.now(), inCallWith: null, callStartedAt: null,
         })
-        pushEvent(userId, 'registered', { id: userId, username })
-        broadcastPeerList()
+        await pushEvent(userId, 'registered', { id: userId, username })
+        await broadcastPeerList()
         break
       }
 
       case 'call-offer': {
-        const caller = peers.get(userId)
-        const callee = peers.get(data.targetId)
+        const caller = await getPeer(userId)
+        const callee = await getPeer(data.targetId)
         if (!callee) break
-        pushEvent(data.targetId, 'incoming-call', {
+        await pushEvent(data.targetId, 'incoming-call', {
           fromId: userId, fromName: caller?.username || 'Unknown', offer: data.offer,
         })
         break
       }
 
       case 'call-answer': {
-        const caller = peers.get(userId)
-        const callee = peers.get(data.targetId)
+        const caller = await getPeer(userId)
+        const callee = await getPeer(data.targetId)
         if (!callee) break
-        const callId = generateCallId()
+        const callId = await generateCallId()
         const now = Date.now()
-        activeCalls.set(callId, {
+        await addActiveCall({
           id: callId, callerId: data.targetId, callerName: callee?.username || 'Unknown',
           calleeId: userId, calleeName: caller?.username || 'Unknown', startedAt: now,
         })
-        if (caller) { caller.inCallWith = data.targetId; caller.callStartedAt = now }
-        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now }
-        pushEvent(data.targetId, 'call-answered', { fromId: userId, answer: data.answer })
-        broadcastAdminSnapshot()
+        if (caller) { caller.inCallWith = data.targetId; caller.callStartedAt = now; await kv.set(pk(userId), JSON.stringify(caller)) }
+        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now; await kv.set(pk(data.targetId), JSON.stringify(callee)) }
+        await pushEvent(data.targetId, 'call-answered', { fromId: userId, answer: data.answer })
+        await broadcastAdminSnapshot()
         break
       }
 
       case 'ice-candidate': {
-        pushEvent(data.targetId, 'ice-candidate', { fromId: userId, candidate: data.candidate })
+        await pushEvent(data.targetId, 'ice-candidate', { fromId: userId, candidate: data.candidate })
         break
       }
 
       case 'call-rejected': {
-        pushEvent(data.targetId, 'call-rejected', { fromId: userId })
+        await pushEvent(data.targetId, 'call-rejected', { fromId: userId })
         break
       }
 
       case 'call-ended': {
-        pushEvent(data.targetId, 'call-ended', { fromId: userId })
-        const peer = peers.get(userId)
-        const other = peers.get(data.targetId)
-        if (peer) { peer.inCallWith = null; peer.callStartedAt = null }
-        if (other) { other.inCallWith = null; other.callStartedAt = null }
-        for (const [cid, call] of activeCalls) {
+        await pushEvent(data.targetId, 'call-ended', { fromId: userId })
+        const peer = await getPeer(userId)
+        const other = await getPeer(data.targetId)
+        if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await kv.set(pk(userId), JSON.stringify(peer)) }
+        if (other) { other.inCallWith = null; other.callStartedAt = null; await kv.set(pk(data.targetId), JSON.stringify(other)) }
+        const calls = await getAllActiveCalls()
+        for (const call of calls) {
           if (
             (call.callerId === userId && call.calleeId === data.targetId) ||
             (call.callerId === data.targetId && call.calleeId === userId)
-          ) { activeCalls.delete(cid); break }
+          ) { await removeActiveCall(call.id); break }
         }
-        broadcastAdminSnapshot()
+        await broadcastAdminSnapshot()
         break
       }
 
       case 'admin-force-disconnect': {
-        const target = peers.get(data.targetId)
+        const target = await getPeer(data.targetId)
         if (!target || target.isAdmin) break
-        if (target.inCallWith) endCallForPeer(data.targetId)
-        pushEvent(data.targetId, 'force-disconnected', { reason: 'Disconnected by admin' })
-        peers.delete(data.targetId)
-        events.delete(data.targetId)
-        lastSeen.delete(data.targetId)
-        broadcastPeerList()
+        if (target.inCallWith) await endCallForPeer(data.targetId)
+        await pushEvent(data.targetId, 'force-disconnected', { reason: 'Disconnected by admin' })
+        await deletePeer(data.targetId)
+        await broadcastPeerList()
         break
       }
 
       case 'admin-end-call': {
-        endCallForPeer(data.targetId)
+        await endCallForPeer(data.targetId)
         break
       }
 
       case 'admin-ban': {
-        const target = peers.get(data.targetId)
+        const target = await getPeer(data.targetId)
         if (!target || target.isAdmin) break
-        if (target.inCallWith) endCallForPeer(data.targetId)
+        if (target.inCallWith) await endCallForPeer(data.targetId)
         const cleanName = target.username.replace(/^ADMIN: /, '')
-        bannedUsernames.add(cleanName.toLowerCase())
-        pushEvent(data.targetId, 'banned', { reason: 'Banned by admin' })
-        peers.delete(data.targetId)
-        events.delete(data.targetId)
-        lastSeen.delete(data.targetId)
-        broadcastPeerList()
+        await addBan(cleanName)
+        await pushEvent(data.targetId, 'banned', { reason: 'Banned by admin' })
+        await deletePeer(data.targetId)
+        await broadcastPeerList()
         break
       }
 
       case 'admin-unban': {
-        bannedUsernames.delete(data.username.toLowerCase())
-        broadcastAdminSnapshot()
+        await removeBan(data.username)
+        await broadcastAdminSnapshot()
         break
       }
     }
 
+    // If stale peers were cleaned, rebroadcast
+    if (stale && type !== 'register' && type !== 'admin-register') {
+      await broadcastPeerList()
+    }
+
     return NextResponse.json({ ok: true })
-  } catch {
-    return NextResponse.json({ error: 'Invalid request' }, { status: 400 })
+  } catch (error: any) {
+    console.error('Signal POST error:', error)
+    const msg = error?.message || ''
+    if (msg.includes('ECONNREFUSED') || msg.includes('ENOENT') || msg.includes('fetch failed')) {
+      return NextResponse.json({
+        error: 'Cannot connect to Vercel KV. Make sure KV store is linked and redeployed.',
+        setup: true,
+      }, { status: 503 })
+    }
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
 
@@ -280,12 +428,17 @@ export async function GET(req: NextRequest) {
 
   if (!userId) return NextResponse.json({ events: [] })
 
-  lastSeen.set(userId, Date.now())
-  cleanStale()
+  if (!kvReady) {
+    return NextResponse.json({ events: [], kvError: true, msg: 'Vercel KV not linked' })
+  }
 
-  const queue = events.get(userId) || []
-  const newEvents = queue.filter((e) => e.ts > since)
-  events.set(userId, queue.filter((e) => e.ts <= since))
-
-  return NextResponse.json({ events: newEvents })
+  try {
+    await touchPeer(userId)
+    await cleanStalePeers()
+    const newEvents = await getEvents(userId, since)
+    return NextResponse.json({ events: newEvents })
+  } catch (error: any) {
+    console.error('Signal GET error:', error)
+    return NextResponse.json({ events: [] })
+  }
 }

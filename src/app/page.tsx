@@ -575,6 +575,8 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
 
 type AppMode = 'login' | 'admin' | 'call'
 
+const AUTH_KEY = 'sylvid_auth'
+
 export default function VideoCallPage() {
   const [mode, setMode] = useState<AppMode>('login')
   const [usernameInput, setUsernameInput] = useState('')
@@ -585,10 +587,39 @@ export default function VideoCallPage() {
 
   const webrtc = useWebRTC()
 
+  // Restore login from localStorage on mount
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(AUTH_KEY)
+      if (saved) {
+        const { mode: savedMode, username } = JSON.parse(saved)
+        if (savedMode === 'admin') {
+          setMode('admin')
+        } else if (savedMode === 'call' && username) {
+          setUsernameInput(username)
+          setMode('call')
+          // Delay register slightly to ensure socket is ready
+          setTimeout(() => webrtc.register(username), 150)
+        }
+      }
+    } catch { /* ignore */ }
+  }, [])
+
+  const saveAuth = (m: AppMode, username?: string) => {
+    try {
+      localStorage.setItem(AUTH_KEY, JSON.stringify({ mode: m, username: username || '' }))
+    } catch { /* ignore */ }
+  }
+
+  const clearAuth = () => {
+    try { localStorage.removeItem(AUTH_KEY) } catch { /* ignore */ }
+  }
+
   const handleAdminLogin = () => {
     if (passInput === 'admin2024') {
       setMode('admin')
       setLoginError('')
+      saveAuth('admin')
     } else {
       setLoginError('Wrong password')
     }
@@ -598,8 +629,17 @@ export default function VideoCallPage() {
     const name = usernameInput.trim()
     if (name) {
       setMode('call')
+      saveAuth('call', name)
       webrtc.register(name)
     }
+  }
+
+  const handleLogout = () => {
+    clearAuth()
+    webrtc.socketRef.current?.disconnect()
+    setMode('login')
+    setUsernameInput('')
+    setPassInput('')
   }
 
   // ===== LOGIN SCREEN =====
@@ -680,7 +720,7 @@ export default function VideoCallPage() {
   const inCall = isInCall || callStatus === 'connecting' || callStatus === 'connected'
 
   if (mode === 'admin') {
-    return <AdminDashboard onLogout={() => setMode('login')} />
+    return <AdminDashboard onLogout={handleLogout} />
   }
 
   const handleCopyId = () => {
@@ -744,10 +784,16 @@ export default function VideoCallPage() {
               <p className="text-xs text-neutral-500">P2P encrypted calls</p>
             </div>
           </div>
-          <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
-            <div className="w-2 h-2 rounded-full bg-emerald-400 mr-2 animate-pulse" />
-            Online
-          </Badge>
+          <div className="flex items-center gap-2">
+            <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 mr-2 animate-pulse" />
+              Online
+            </Badge>
+            <Button variant="ghost" onClick={handleLogout} className="text-neutral-400 hover:text-red-400 gap-1.5" size="sm">
+              <LogOut className="w-4 h-4" />
+              <span className="text-xs hidden sm:inline">Logout</span>
+            </Button>
+          </div>
         </header>
 
         <Card className="bg-neutral-900/60 border-neutral-800 backdrop-blur-sm">

@@ -1,6 +1,6 @@
 // ============================================================
 // HTTP Polling Signaling Client (drop-in Socket.io replacement)
-// Works on Vercel serverless, no WebSocket needed
+// Works on Vercel serverless with KV-backed state, no WebSocket needed
 // ============================================================
 
 type EventHandler = (...args: any[]) => void
@@ -31,26 +31,44 @@ function createSignalSocket(): SignalSocket {
     if (!alive) return
     try {
       const res = await fetch(`/api/signal?u=${userId}&s=${lastTs}`)
-      const { events } = await res.json()
+      if (!res.ok) {
+        console.warn(`[Sylvid] Poll error: ${res.status}`)
+        return
+      }
+      const data = await res.json()
+      // Check if KV is not configured
+      if (data.kvError) {
+        console.error('[Sylvid] Vercel KV not linked! See: Vercel Dashboard → Storage → Create KV Store')
+        fire('kv-error', data)
+        return
+      }
+      const events: Array<{ type: string; data: any; ts: number }> = data.events || []
       for (const ev of events) {
         if (ev.ts > lastTs) lastTs = ev.ts
         fire(ev.type, ev.data)
       }
-    } catch {
-      // Network error — will retry on next interval
+    } catch (e) {
+      console.warn('[Sylvid] Poll network error:', e)
     }
   }
 
   async function send(event: string, data?: any) {
     if (!alive) return
     try {
-      await fetch('/api/signal', {
+      const res = await fetch('/api/signal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, type: event, data: data || {} }),
       })
-    } catch {
-      // Silently fail
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}))
+        if (errData.setup) {
+          console.error('[Sylvid] Server error:', errData.error)
+          fire('kv-error', errData)
+        }
+      }
+    } catch (e) {
+      console.warn('[Sylvid] Send network error:', e)
     }
   }
 
