@@ -349,7 +349,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
             </div>
             <div>
               <h1 className="text-lg font-bold text-white tracking-tight">Admin Dashboard</h1>
-              <p className="text-xs text-neutral-500">VaultCall control center</p>
+              <p className="text-xs text-neutral-500">Sylvid control center</p>
             </div>
           </div>
           <Button variant="ghost" onClick={onLogout} className="text-neutral-400 hover:text-red-400 gap-2">
@@ -611,7 +611,7 @@ export default function VideoCallPage() {
               <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
                 <Video className="w-8 h-8 text-emerald-400" />
               </div>
-              <h1 className="text-2xl font-bold text-white tracking-tight">VaultCall</h1>
+              <h1 className="text-2xl font-bold text-white tracking-tight">Sylvid</h1>
               <p className="text-neutral-400 text-sm text-center">Military-grade encrypted video calls</p>
             </div>
 
@@ -739,7 +739,7 @@ export default function VideoCallPage() {
               <Video className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
-              <h1 className="text-lg font-bold text-white tracking-tight">VaultCall</h1>
+              <h1 className="text-lg font-bold text-white tracking-tight">Sylvid</h1>
               <p className="text-xs text-neutral-500">P2P encrypted calls</p>
             </div>
           </div>

@@ -1,6 +1,6 @@
 {
-  "name": "VaultCall",
-  "short_name": "VaultCall",
+  "name": "Sylvid",
+  "short_name": "Sylvid",
   "description": "Military-grade encrypted video calls. Anti-screenshot, E2E secure.",
   "start_url": "/",
   "display": "standalone",

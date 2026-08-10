@@ -14,13 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VaultCall — Secure Encrypted Video Calls",
+  title: "Sylvid — Secure Encrypted Video Calls",
   description: "Military-grade end-to-end encrypted video calling. Anti-screenshot, anti-recording. Works on web and Android.",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "VaultCall",
+    title: "Sylvid",
   },
   icons: {
     icon: "/icons/icon-192.png",
