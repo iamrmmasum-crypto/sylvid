@@ -192,7 +192,8 @@ function useWebRTC() {
     })
 
     socket.on('incoming-call', (data) => {
-      setIncomingCall(data); setCallStatus('ringing')
+      setIncomingCall(data)
+      // Don't change callStatus — callee stays in lobby so the accept/reject Dialog is visible
     })
 
     socket.on('call-answered', async (data) => {
@@ -775,44 +776,76 @@ export default function VideoCallPage() {
   // Active call
   if (inCall) {
     return (
-      <div className="min-h-screen bg-neutral-950 flex flex-col">
-        <div className="flex-1 relative">
-          <div className="absolute inset-0">
-            <VideoPlayer stream={remoteStream} label={callStatus === 'connecting' ? 'Connecting...' : callStatus === 'ringing' ? 'Ringing...' : 'Remote'} className="w-full h-full" isProtected />
-          </div>
-          <div className="absolute top-4 right-4 w-32 h-44 sm:w-40 sm:h-56 md:w-48 md:h-64 rounded-2xl overflow-hidden shadow-2xl border-2 border-white/10 z-10">
-            <VideoPlayer stream={localStream} muted label="You" mirrored className="w-full h-full" isProtected />
-          </div>
-          {callStatus === 'ringing' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-                <p className="text-white font-medium">Ringing {ringTarget?.name}...</p>
-                <p className="text-white/60 text-sm">Waiting for answer</p>
-              </div>
+      <>
+        <div className="min-h-screen bg-neutral-950 flex flex-col">
+          <div className="flex-1 relative">
+            <div className="absolute inset-0">
+              <VideoPlayer stream={remoteStream} label={callStatus === 'connecting' ? 'Connecting...' : callStatus === 'ringing' ? 'Ringing...' : 'Remote'} className="w-full h-full" isProtected />
             </div>
-          )}
-          {callStatus === 'connecting' && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
-              <div className="flex flex-col items-center gap-3">
-                <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
-                <p className="text-white font-medium">Connecting...</p>
-              </div>
+            <div className="absolute top-4 right-4 w-32 h-44 sm:w-40 sm:h-56 md:w-48 md:h-64 rounded-2xl overflow-hidden shadow-2xl border-2 border-white/10 z-10">
+              <VideoPlayer stream={localStream} muted label="You" mirrored className="w-full h-full" isProtected />
             </div>
-          )}
+            {callStatus === 'ringing' && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-white font-medium">Ringing {ringTarget?.name}...</p>
+                  <p className="text-white/60 text-sm">Waiting for answer</p>
+                </div>
+              </div>
+            )}
+            {callStatus === 'connecting' && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+                  <p className="text-white font-medium">Connecting...</p>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="bg-black/80 backdrop-blur-xl px-6 py-5 flex items-center justify-center gap-4">
+            <Button onClick={toggleMute} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isMuted ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
+              {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+            </Button>
+            <Button onClick={toggleCamera} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isCameraOff ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
+              {isCameraOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
+            </Button>
+            <Button onClick={endCall} variant="ghost" size="icon" className="w-16 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white">
+              <PhoneOff className="w-6 h-6" />
+            </Button>
+          </div>
         </div>
-        <div className="bg-black/80 backdrop-blur-xl px-6 py-5 flex items-center justify-center gap-4">
-          <Button onClick={toggleMute} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isMuted ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
-            {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
-          </Button>
-          <Button onClick={toggleCamera} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isCameraOff ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
-            {isCameraOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
-          </Button>
-          <Button onClick={endCall} variant="ghost" size="icon" className="w-16 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white">
-            <PhoneOff className="w-6 h-6" />
-          </Button>
-        </div>
-      </div>
+
+        {/* Incoming call dialog — can arrive even while in another call */}
+        <Dialog open={!!incomingCall}>
+          <DialogContent className="bg-neutral-900 border-neutral-800 text-white sm:max-w-md">
+            <DialogHeader className="text-center items-center">
+              <div className="w-16 h-16 rounded-full bg-gradient-to-br from-violet-400 to-fuchsia-400 flex items-center justify-center text-white font-bold text-2xl mx-auto mb-4">
+                {incomingCall?.fromName?.charAt(0).toUpperCase()}
+              </div>
+              <DialogTitle className="text-xl">{incomingCall?.fromName}</DialogTitle>
+              <DialogDescription className="text-neutral-400">Incoming video call</DialogDescription>
+            </DialogHeader>
+            <div className="flex justify-center gap-4 pt-4">
+              <Button onClick={rejectCall} variant="ghost" size="lg" className="w-14 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white">
+                <PhoneOff className="w-6 h-6" />
+              </Button>
+              <Button onClick={acceptCall} variant="ghost" size="lg" className="w-14 h-14 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white">
+                <PhoneIncoming className="w-6 h-6" />
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {callStatus === 'ended' && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+            <Card className="bg-neutral-900 border-neutral-800 p-8 text-center">
+              <PhoneOff className="w-12 h-12 text-red-400 mx-auto mb-3" />
+              <p className="text-white font-medium">Call ended</p>
+            </Card>
+          </div>
+        )}
+      </>
     )
   }
 
