@@ -1,7 +1,7 @@
 'use client'
 
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { io, Socket } from 'socket.io-client'
+import { createSignalSocket, type SignalSocket } from '@/hooks/useSignaling'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -136,7 +136,7 @@ function VideoPlayer({
 // ============================================================
 
 function useWebRTC() {
-  const socketRef = useRef<Socket | null>(null)
+  const socketRef = useRef<SignalSocket | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const remoteStreamRef = useRef<MediaStream | null>(null)
@@ -166,7 +166,7 @@ function useWebRTC() {
   }, [])
 
   useEffect(() => {
-    const socket = io({ path: '/api/socket/io', transports: ['websocket', 'polling'] })
+    const socket = createSignalSocket()
     socketRef.current = socket
 
     socket.on('registered', (data: { id: string; username: string }) => {
@@ -268,7 +268,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const [snapshot, setSnapshot] = useState<AdminSnapshot | null>(null)
   const [connecting, setConnecting] = useState(true)
   const [now, setNow] = useState(Date.now())
-  const socketRef = useRef<Socket | null>(null)
+  const socketRef = useRef<SignalSocket | null>(null)
 
   // Live ticker — updates every second for call duration timers
   useEffect(() => {
@@ -277,7 +277,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   }, [])
 
   useEffect(() => {
-    const socket = io({ path: '/api/socket/io', transports: ['websocket', 'polling'] })
+    const socket = createSignalSocket()
     socketRef.current = socket
 
     socket.on('connect', () => {
