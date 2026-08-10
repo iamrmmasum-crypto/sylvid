@@ -112,7 +112,8 @@ async function getEvents(userId: string, since: number): Promise<QueuedEvent[]> 
   } else {
     const queue = mem.events.get(userId) || []
     const newEvents = queue.filter((e) => e.ts > since)
-    mem.events.set(userId, queue.filter((e) => e.ts <= since))
+    // Remove all delivered events (both old and new) to prevent memory leak
+    mem.events.set(userId, [])
     return newEvents
   }
 }
@@ -519,8 +520,19 @@ export async function GET(req: NextRequest) {
     await touchPeer(userId)
     await cleanStalePeers()
     const newEvents = await getEvents(userId, since)
-    return NextResponse.json({ events: newEvents, backend: useKV ? 'kv' : 'memory' })
+    // Always include the current peer list so the client stays in sync
+    // even if peer-list events are missed (serverless, network hiccups)
+    const allPeers = await getAllPeers()
+    const peerList = allPeers.map((p) => ({
+      id: p.id, username: p.username, device: p.device,
+      inCall: !!p.inCallWith, connectedAt: p.connectedAt,
+    }))
+    return NextResponse.json({
+      events: newEvents,
+      peers: peerList,
+      backend: useKV ? 'kv' : 'memory',
+    })
   } catch {
-    return NextResponse.json({ events: [] })
+    return NextResponse.json({ events: [], peers: [] })
   }
 }

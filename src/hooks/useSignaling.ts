@@ -10,6 +10,8 @@ interface SignalSocket {
   emit(event: string, data?: any): void
   disconnect(): void
   connected: boolean
+  /** The internal user ID used for polling and signaling */
+  userId: string
 }
 
 function createSignalSocket(): SignalSocket {
@@ -41,6 +43,11 @@ function createSignalSocket(): SignalSocket {
         console.error('[Sylvid] Vercel KV not linked! See: Vercel Dashboard → Storage → Create KV Store')
         fire('kv-error', data)
         return
+      }
+      // Fire peer-list from the poll response so the client always has fresh peer data
+      // even if peer-list events are missed due to serverless routing or network issues
+      if (data.peers && Array.isArray(data.peers)) {
+        fire('peer-list', { peers: data.peers })
       }
       const events: Array<{ type: string; data: any; ts: number }> = data.events || []
       for (const ev of events) {
@@ -99,6 +106,7 @@ function createSignalSocket(): SignalSocket {
       fire('disconnect')
     },
     get connected() { return alive },
+    get userId() { return userId },
   }
 }
 

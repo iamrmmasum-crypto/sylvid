@@ -170,13 +170,17 @@ function useWebRTC() {
     const socket = createSignalSocket()
     socketRef.current = socket
 
+    // Use the socket's internal userId for self-filtering — available immediately,
+    // unlike myIdRef which is only set after the 'registered' event arrives
+    const selfId = socket.userId
+
     socket.on('registered', (data: { id: string; username: string }) => {
       myIdRef.current = data.id
       setMyId(data.id); setMyUsername(data.username); setIsRegistered(true)
     })
 
     socket.on('peer-list', (data: { peers: Peer[] }) => {
-      setPeers(data.peers.filter((p) => p.id !== myIdRef.current && !p.isAdmin))
+      setPeers(data.peers.filter((p) => p.id !== selfId && !p.isAdmin))
     })
 
     socket.on('incoming-call', (data) => {
