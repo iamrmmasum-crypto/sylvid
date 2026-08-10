@@ -309,7 +309,7 @@ async function broadcastEvent(type: string, data: any, excludeId?: string) {
     await pipe.exec()
   } else {
     for (const peer of peers) {
-      if (peer.id !== excludeId) pushEvent(peer.id, type, data)
+      if (peer.id !== excludeId) await pushEvent(peer.id, type, data)
     }
   }
 }
@@ -392,6 +392,7 @@ export async function POST(req: NextRequest) {
 
       case 'register': {
         const { username } = data
+        console.log(`[Sylvid] register: ${username} (${userId.slice(0,8)})`)
         if (await isBanned(username)) {
           await pushEvent(userId, 'banned', { reason: 'You have been banned' })
           break
@@ -408,7 +409,8 @@ export async function POST(req: NextRequest) {
       case 'call-offer': {
         const caller = await getPeer(userId)
         const callee = await getPeer(data.targetId)
-        if (!callee) break
+        console.log(`[Sylvid] call-offer from ${caller?.username}(${userId.slice(0,8)}) → target ${data.targetId.slice(0,8)}, callee found: ${!!callee}`)
+        if (!callee) { console.log(`[Sylvid] callee NOT FOUND for ${data.targetId}`); break }
         await pushEvent(data.targetId, 'incoming-call', {
           fromId: userId, fromName: caller?.username || 'Unknown', offer: data.offer,
         })

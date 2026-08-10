@@ -153,6 +153,7 @@ function useWebRTC() {
   const [isMuted, setIsMuted] = useState(false)
   const [isCameraOff, setIsCameraOff] = useState(false)
   const [callStatus, setCallStatus] = useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle')
+  const [callError, setCallError] = useState('')
 
   const myIdRef = useRef<string | null>(null)
 
@@ -226,11 +227,24 @@ function useWebRTC() {
   const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
 
   const callPeer = useCallback(async (targetId: string) => {
-    const stream = await getLocalStream()
-    createPeerConnection(stream, targetId)
-    const pc = pcRef.current; if (!pc) return
-    const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
-    socketRef.current?.emit('call-offer', { targetId, offer: offer.toJSON() }); setCallStatus('connecting')
+    setCallError('')
+    try {
+      console.log('[Sylvid] Calling:', targetId)
+      const stream = await getLocalStream()
+      createPeerConnection(stream, targetId)
+      const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
+      const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
+      console.log('[Sylvid] Sending call-offer to', targetId)
+      if (socketRef.current) {
+        socketRef.current.emit('call-offer', { targetId, offer: offer.toJSON() })
+        setCallStatus('connecting')
+      } else {
+        setCallError('Not connected to server')
+      }
+    } catch (err: any) {
+      console.error('[Sylvid] callPeer error:', err)
+      setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Call failed: ${err?.message || err}`)
+    }
   }, [getLocalStream, createPeerConnection])
 
   const acceptCall = useCallback(async () => {
@@ -257,7 +271,7 @@ function useWebRTC() {
   const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
   const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
 
-  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, socketRef }
+  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, socketRef }
 }
 
 // ============================================================
@@ -715,7 +729,7 @@ export default function VideoCallPage() {
 
   // ===== ADMIN DASHBOARD =====
   // ===== CALL MODE (user) =====
-  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus } = webrtc
+  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
   const inCall = isInCall || callStatus === 'connecting' || callStatus === 'connected'
 
@@ -861,6 +875,15 @@ export default function VideoCallPage() {
             <span>{isMobile ? 'Mobile — install as app for full screen' : 'Desktop mode'}</span>
           </div>
         </div>
+
+        {callError && (
+          <Card className="bg-red-500/10 border-red-500/30">
+            <CardContent className="p-3 flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
+              <p className="text-red-400 text-sm">{callError}</p>
+            </CardContent>
+          </Card>
+        )}
       </div>
 
       <Dialog open={!!incomingCall}>
