@@ -154,17 +154,25 @@ function useWebRTC() {
   const [isCameraOff, setIsCameraOff] = useState(false)
   const [callStatus, setCallStatus] = useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle')
   const [callError, setCallError] = useState('')
+  const [ringTarget, setRingTarget] = useState<{ id: string; name: string } | null>(null)
+  const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const myIdRef = useRef<string | null>(null)
 
+  const clearRingTimer = useCallback(() => {
+    if (ringTimerRef.current) { clearTimeout(ringTimerRef.current); ringTimerRef.current = null }
+  }, [])
+
   const cleanupCall = useCallback(() => {
+    clearRingTimer()
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
     remoteStreamRef.current = null
     remotePeerIdRef.current = null
     setRemoteStream(null); setLocalStream(null); setIsInCall(false)
     setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
-  }, [])
+    setRingTarget(null)
+  }, [clearRingTimer])
 
   useEffect(() => {
     const socket = createSignalSocket()
@@ -188,7 +196,8 @@ function useWebRTC() {
     })
 
     socket.on('call-answered', async (data) => {
- const pc = pcRef.current
+      clearRingTimer()
+      const pc = pcRef.current
       if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(data.answer)); setCallStatus('connecting') }
     })
 
@@ -200,7 +209,7 @@ function useWebRTC() {
     })
 
     socket.on('call-rejected', () => { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
-    socket.on('call-ended', () => { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
+    socket.on('call-ended', () => { clearRingTimer(); cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
     socket.on('force-disconnected', () => { cleanupCall(); setCallStatus('ended'); setIsRegistered(false) })
 
     return () => { socket.disconnect() }
@@ -230,10 +239,10 @@ function useWebRTC() {
 
   const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
 
-  const callPeer = useCallback(async (targetId: string) => {
+  const callPeer = useCallback(async (targetId: string, targetName?: string) => {
     setCallError('')
     try {
-      console.log('[Sylvid] Calling:', targetId)
+      console.log('[Sylvid] Calling:', targetId, targetName)
       const stream = await getLocalStream()
       createPeerConnection(stream, targetId)
       const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
@@ -241,7 +250,17 @@ function useWebRTC() {
       console.log('[Sylvid] Sending call-offer to', targetId)
       if (socketRef.current) {
         socketRef.current.emit('call-offer', { targetId, offer: { type: offer.type, sdp: offer.sdp } })
-        setCallStatus('connecting')
+        setRingTarget({ id: targetId, name: targetName || 'User' })
+        setCallStatus('ringing')
+        // Auto-cancel if no answer within 30 seconds
+        clearRingTimer()
+        ringTimerRef.current = setTimeout(() => {
+          console.log('[Sylvid] Ring timeout — no answer')
+          if (socketRef.current) socketRef.current.emit('call-ended', { targetId })
+          cleanupCall()
+          setCallStatus('ended')
+          setTimeout(() => setCallStatus('idle'), 2000)
+        }, 30000)
       } else {
         setCallError('Not connected to server')
       }
@@ -249,7 +268,7 @@ function useWebRTC() {
       console.error('[Sylvid] callPeer error:', err)
       setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Call failed: ${err?.message || err}`)
     }
-  }, [getLocalStream, createPeerConnection])
+  }, [getLocalStream, createPeerConnection, clearRingTimer, cleanupCall])
 
   const acceptCall = useCallback(async () => {
     if (!incomingCall) return
@@ -735,7 +754,7 @@ export default function VideoCallPage() {
   // ===== CALL MODE (user) =====
   const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
-  const inCall = isInCall || callStatus === 'connecting' || callStatus === 'connected'
+  const inCall = isInCall || callStatus === 'ringing' || callStatus === 'connecting' || callStatus === 'connected'
 
   if (mode === 'admin') {
     return <AdminDashboard onLogout={handleLogout} />
@@ -759,11 +778,20 @@ export default function VideoCallPage() {
       <div className="min-h-screen bg-neutral-950 flex flex-col">
         <div className="flex-1 relative">
           <div className="absolute inset-0">
-            <VideoPlayer stream={remoteStream} label={callStatus === 'connecting' ? 'Connecting...' : 'Remote'} className="w-full h-full" isProtected />
+            <VideoPlayer stream={remoteStream} label={callStatus === 'connecting' ? 'Connecting...' : callStatus === 'ringing' ? 'Ringing...' : 'Remote'} className="w-full h-full" isProtected />
           </div>
           <div className="absolute top-4 right-4 w-32 h-44 sm:w-40 sm:h-56 md:w-48 md:h-64 rounded-2xl overflow-hidden shadow-2xl border-2 border-white/10 z-10">
             <VideoPlayer stream={localStream} muted label="You" mirrored className="w-full h-full" isProtected />
           </div>
+          {callStatus === 'ringing' && (
+            <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
+              <div className="flex flex-col items-center gap-3">
+                <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+                <p className="text-white font-medium">Ringing {ringTarget?.name}...</p>
+                <p className="text-white/60 text-sm">Waiting for answer</p>
+              </div>
+            </div>
+          )}
           {callStatus === 'connecting' && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
               <div className="flex flex-col items-center gap-3">
@@ -862,7 +890,7 @@ export default function VideoCallPage() {
                         </div>
                       </div>
                     </div>
-                    <Button onClick={() => callPeer(peer.id)} className="bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl h-10 px-4">
+                    <Button onClick={() => callPeer(peer.id, peer.username)} className="bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl h-10 px-4">
                       <Phone className="w-4 h-4 mr-2" />
                       Call
                     </Button>
