@@ -166,7 +166,7 @@ function useWebRTC() {
   }, [])
 
   useEffect(() => {
-    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
+    const socket = io({ path: '/api/socket/io', transports: ['websocket', 'polling'] })
     socketRef.current = socket
 
     socket.on('registered', (data: { id: string; username: string }) => {
@@ -277,7 +277,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   }, [])
 
   useEffect(() => {
-    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
+    const socket = io({ path: '/api/socket/io', transports: ['websocket', 'polling'] })
     socketRef.current = socket
 
     socket.on('connect', () => {
