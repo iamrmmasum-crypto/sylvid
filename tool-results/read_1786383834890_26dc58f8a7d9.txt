@@ -1,0 +1,800 @@
+     1→'use client'
+     2→
+     3→import { useRef, useState, useEffect, useCallback } from 'react'
+     4→import { io, Socket } from 'socket.io-client'
+     5→import { Button } from '@/components/ui/button'
+     6→import { Input } from '@/components/ui/input'
+     7→import { Card, CardContent } from '@/components/ui/card'
+     8→import { Badge } from '@/components/ui/badge'
+     9→import {
+    10→  Dialog,
+    11→  DialogContent,
+    12→  DialogHeader,
+    13→  DialogTitle,
+    14→  DialogDescription,
+    15→} from '@/components/ui/dialog'
+    16→import {
+    17→  Video,
+    18→  VideoOff,
+    19→  Mic,
+    20→  MicOff,
+    21→  Phone,
+    22→  PhoneOff,
+    23→  PhoneIncoming,
+    24→  Users,
+    25→  Monitor,
+    26→  Smartphone,
+    27→  Copy,
+    28→  Check,
+    29→  Shield,
+    30→  LogOut,
+    31→  Ban,
+    32→  PhoneCall,
+    33→  Clock,
+    34→  AlertTriangle,
+    35→  Wifi,
+    36→  WifiOff,
+    37→  Trash2,
+    38→} from 'lucide-react'
+    39→
+    40→// ============================================================
+    41→// TYPES
+    42→// ============================================================
+    43→
+    44→interface Peer {
+    45→  id: string
+    46→  username: string
+    47→  device?: string
+    48→  inCall?: boolean
+    49→  connectedAt?: number
+    50→  inCallWith?: string | null
+    51→  callStartedAt?: number | null
+    52→  isAdmin?: boolean
+    53→}
+    54→
+    55→interface ActiveCall {
+    56→  id: string
+    57→  callerId: string
+    58→  callerName: string
+    59→  calleeId: string
+    60→  calleeName: string
+    61→  startedAt: number
+    62→}
+    63→
+    64→interface AdminSnapshot {
+    65→  peers: Peer[]
+    66→  activeCalls: ActiveCall[]
+    67→  bannedCount: number
+    68→  totalConnected: number
+    69→}
+    70→
+    71→// ============================================================
+    72→// VIDEO PLAYER COMPONENT
+    73→// ============================================================
+    74→
+    75→function VideoPlayer({
+    76→  stream,
+    77→  muted = false,
+    78→  label,
+    79→  mirrored = false,
+    80→  className = '',
+    81→  isProtected = false,
+    82→}: {
+    83→  stream: MediaStream | null
+    84→  muted?: boolean
+    85→  label: string
+    86→  mirrored?: boolean
+    87→  className?: string
+    88→  isProtected?: boolean
+    89→}) {
+    90→  const videoRef = useRef<HTMLVideoElement>(null)
+    91→
+    92→  useEffect(() => {
+    93→    if (videoRef.current && stream) {
+    94→      videoRef.current.srcObject = stream
+    95→    }
+    96→    return () => {
+    97→      if (videoRef.current) videoRef.current.srcObject = null
+    98→    }
+    99→  }, [stream])
+   100→
+   101→  return (
+   102→    <div
+   103→      className={`relative rounded-2xl overflow-hidden bg-neutral-900 ${isProtected ? 'select-none pointer-events-none' : ''} ${className}`}
+   104→      onContextMenu={(e) => isProtected && e.preventDefault()}
+   105→    >
+   106→      {isProtected && <div className="absolute inset-0 z-10" aria-hidden="true" />}
+   107→      <video
+   108→        ref={videoRef}
+   109→        autoPlay
+   110→        playsInline
+   111→        muted={muted}
+   112→        disablePictureInPicture
+   113→        disableRemotePlayback
+   114→        controlsList="nodownload nofullscreen noremoteplayback"
+   115→        className={`w-full h-full object-cover ${mirrored ? 'scale-x-[-1]' : ''}`}
+   116→      />
+   117→      {!stream && (
+   118→        <div className="absolute inset-0 flex items-center justify-center text-neutral-500">
+   119→          <Video className="w-16 h-16 opacity-30" />
+   120→        </div>
+   121→      )}
+   122→      <div className="absolute bottom-3 left-3">
+   123→        <Badge variant="secondary" className="bg-black/60 text-white border-0 backdrop-blur-sm text-sm">
+   124→          {label}
+   125→        </Badge>
+   126→      </div>
+   127→    </div>
+   128→  )
+   129→}
+   130→
+   131→// ============================================================
+   132→// WEBRTC HOOK (for admin making test calls)
+   133→// ============================================================
+   134→
+   135→function useWebRTC() {
+   136→  const socketRef = useRef<Socket | null>(null)
+   137→  const pcRef = useRef<RTCPeerConnection | null>(null)
+   138→  const localStreamRef = useRef<MediaStream | null>(null)
+   139→  const remoteStreamRef = useRef<MediaStream | null>(null)
+   140→  const remotePeerIdRef = useRef<string | null>(null)
+   141→
+   142→  const [peers, setPeers] = useState<Peer[]>([])
+   143→  const [myId, setMyId] = useState<string | null>(null)
+   144→  const [myUsername, setMyUsername] = useState('')
+   145→  const [isRegistered, setIsRegistered] = useState(false)
+   146→  const [incomingCall, setIncomingCall] = useState<{ fromId: string; fromName: string; offer: RTCSessionDescriptionInit } | null>(null)
+   147→  const [isInCall, setIsInCall] = useState(false)
+   148→  const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null)
+   149→  const [localStream, setLocalStream] = useState<MediaStream | null>(null)
+   150→  const [isMuted, setIsMuted] = useState(false)
+   151→  const [isCameraOff, setIsCameraOff] = useState(false)
+   152→  const [callStatus, setCallStatus] = useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle')
+   153→
+   154→  const myIdRef = useRef<string | null>(null)
+   155→
+   156→  const cleanupCall = useCallback(() => {
+   157→    if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
+   158→    if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
+   159→    remoteStreamRef.current = null
+   160→    remotePeerIdRef.current = null
+   161→    setRemoteStream(null); setLocalStream(null); setIsInCall(false)
+   162→    setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
+   163→  }, [])
+   164→
+   165→  useEffect(() => {
+   166→    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
+   167→    socketRef.current = socket
+   168→
+   169→    socket.on('registered', (data: { id: string; username: string }) => {
+   170→      myIdRef.current = data.id
+   171→      setMyId(data.id); setMyUsername(data.username); setIsRegistered(true)
+   172→    })
+   173→
+   174→    socket.on('peer-list', (data: { peers: Peer[] }) => {
+   175→      setPeers(data.peers.filter((p) => p.id !== myIdRef.current && !p.isAdmin))
+   176→    })
+   177→
+   178→    socket.on('incoming-call', (data) => {
+   179→      setIncomingCall(data); setCallStatus('ringing')
+   180→    })
+   181→
+   182→    socket.on('call-answered', async (data) => {
+   183→ const pc = pcRef.current
+   184→      if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(data.answer)); setCallStatus('connecting') }
+   185→    })
+   186→
+   187→    socket.on('ice-candidate', async (data) => {
+   188→      const pc = pcRef.current
+   189→      if (pc && data.candidate) {
+   190→        try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)) } catch (e) { /* ignore */ }
+   191→      }
+   192→    })
+   193→
+   194→    socket.on('call-rejected', () => { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
+   195→    socket.on('call-ended', () => { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
+   196→    socket.on('force-disconnected', () => { cleanupCall(); setCallStatus('ended'); setIsRegistered(false) })
+   197→
+   198→    return () => { socket.disconnect() }
+   199→  }, [])
+   200→
+   201→  const getLocalStream = useCallback(async () => {
+   202→    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' }, audio: true })
+   203→    localStreamRef.current = stream; setLocalStream(stream); return stream
+   204→  }, [])
+   205→
+   206→  const createPeerConnection = useCallback((stream: MediaStream, remotePeerId: string) => {
+   207→    const pc = new RTCPeerConnection({
+   208→      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+   209→    })
+   210→    pcRef.current = pc; remotePeerIdRef.current = remotePeerId
+   211→    stream.getTracks().forEach((t) => pc.addTrack(t, stream))
+   212→    const remoteMediaStream = new MediaStream()
+   213→    remoteStreamRef.current = remoteMediaStream
+   214→    pc.ontrack = (e) => { e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t)); setRemoteStream(new MediaStream(remoteMediaStream.getTracks())) }
+   215→    pc.onicecandidate = (e) => { if (e.candidate && socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: e.candidate.toJSON() }) }
+   216→    pc.onconnectionstatechange = () => {
+   217→      if (pc.connectionState === 'connected') { setCallStatus('connected'); setIsInCall(true) }
+   218→      else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
+   219→    }
+   220→    return pc
+   221→  }, [cleanupCall, getLocalStream])
+   222→
+   223→  const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
+   224→
+   225→  const callPeer = useCallback(async (targetId: string) => {
+   226→    const stream = await getLocalStream()
+   227→    createPeerConnection(stream, targetId)
+   228→    const pc = pcRef.current; if (!pc) return
+   229→    const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
+   230→    socketRef.current?.emit('call-offer', { targetId, offer: offer.toJSON() }); setCallStatus('connecting')
+   231→  }, [getLocalStream, createPeerConnection])
+   232→
+   233→  const acceptCall = useCallback(async () => {
+   234→    if (!incomingCall) return
+   235→    const stream = await getLocalStream()
+   236→    createPeerConnection(stream, incomingCall.fromId)
+   237→    const pc = pcRef.current; if (!pc) return
+   238→    await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
+   239→    const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
+   240→    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: answer.toJSON() })
+   241→    setIncomingCall(null); setCallStatus('connecting')
+   242→  }, [incomingCall, getLocalStream, createPeerConnection])
+   243→
+   244→  const rejectCall = useCallback(() => {
+   245→    if (incomingCall && socketRef.current) socketRef.current.emit('call-rejected', { targetId: incomingCall.fromId })
+   246→    setIncomingCall(null); setCallStatus('idle')
+   247→  }, [incomingCall])
+   248→
+   249→  const endCall = useCallback(() => {
+   250→    if (socketRef.current && remotePeerIdRef.current) socketRef.current.emit('call-ended', { targetId: remotePeerIdRef.current })
+   251→    cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000)
+   252→  }, [cleanupCall])
+   253→
+   254→  const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
+   255→  const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
+   256→
+   257→  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, socketRef }
+   258→}
+   259→
+   260→// ============================================================
+   261→// ADMIN DASHBOARD
+   262→// ============================================================
+   263→
+   264→function AdminDashboard({ onLogout }: { onLogout: () => void }) {
+   265→  const [snapshot, setSnapshot] = useState<AdminSnapshot | null>(null)
+   266→  const [connecting, setConnecting] = useState(true)
+   267→  const socketRef = useRef<Socket | null>(null)
+   268→
+   269→  useEffect(() => {
+   270→    const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
+   271→    socketRef.current = socket
+   272→
+   273→    socket.on('connect', () => {
+   274→      setConnecting(false)
+   275→      socket.emit('admin-register', { secret: 'admin2024', username: 'Admin' })
+   276→    })
+   277→
+   278→    socket.on('admin-registered', () => {
+   279→      console.log('Admin registered')
+   280→    })
+   281→
+   282→    socket.on('admin-snapshot', (data: AdminSnapshot) => {
+   283→      setSnapshot(data)
+   284→    })
+   285→
+   286→    socket.on('admin-rejected', (data) => {
+   287→      console.error('Admin rejected:', data.reason)
+   288→      setConnecting(false)
+   289→    })
+   290→
+   291→    socket.on('disconnect', () => { setConnecting(true) })
+   292→
+   293→    return () => { socket.disconnect() }
+   294→  }, [])
+   295→
+   296→  const forceDisconnect = (targetId: string) => {
+   297→    socketRef.current?.emit('admin-force-disconnect', { targetId })
+   298→  }
+   299→
+   300→  const endCall = (targetId: string) => {
+   301→    socketRef.current?.emit('admin-end-call', { targetId })
+   302→  }
+   303→
+   304→  const banUser = (targetId: string) => {
+   305→    socketRef.current?.emit('admin-ban', { targetId })
+   306→  }
+   307→
+   308→  const formatUptime = (ms: number) => {
+   309→    const s = Math.floor(ms / 1000)
+   310→    if (s < 60) return `${s}s`
+   311→    const m = Math.floor(s / 60)
+   312→    if (m < 60) return `${m}m ${s % 60}s`
+   313→    const h = Math.floor(m / 60)
+   314→    return `${h}h ${m % 60}m`
+   315→  }
+   316→
+   317→  const activeCallDuration = (startedAt: number) => {
+   318→    const diff = Date.now() - startedAt
+   319→    const m = Math.floor(diff / 60000)
+   320→    const s = Math.floor((diff % 60000) / 1000)
+   321→    return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
+   322→  }
+   323→
+   324→  const activeCallers = new Set(snapshot?.activeCalls.flatMap((c) => [c.callerId, c.calleeId]) ?? [])
+   325→  const regularPeers = snapshot?.peers.filter((p) => !p.isAdmin) ?? []
+   326→
+   327→  return (
+   328→    <div className="min-h-screen bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950">
+   329→      <div className="max-w-5xl mx-auto p-4 sm:p-6 space-y-6">
+   330→        {/* Header */}
+   331→        <header className="flex items-center justify-between">
+   332→          <div className="flex items-center gap-3">
+   333→            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
+   334→              <Shield className="w-5 h-5 text-emerald-400" />
+   335→            </div>
+   336→            <div>
+   337→              <h1 className="text-lg font-bold text-white tracking-tight">Admin Dashboard</h1>
+   338→              <p className="text-xs text-neutral-500">VideoCall control center</p>
+   339→            </div>
+   340→          </div>
+   341→          <Button variant="ghost" onClick={onLogout} className="text-neutral-400 hover:text-red-400 gap-2">
+   342→            <LogOut className="w-4 h-4" />
+   343→            <span className="text-sm">Logout</span>
+   344→          </Button>
+   345→        </header>
+   346→
+   347→        {connecting && !snapshot && (
+   348→          <Card className="bg-neutral-900/60 border-neutral-800">
+   349→            <CardContent className="p-12 text-center">
+   350→              <div className="w-10 h-10 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
+   351→              <p className="text-neutral-400">Connecting to server...</p>
+   352→            </CardContent>
+   353→          </Card>
+   354→        )}
+   355→
+   356→        {snapshot && (
+   357→          <>
+   358→            {/* Stats row */}
+   359→            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+   360→              <StatCard icon={<Users className="w-4 h-4" />} label="Online Users" value={snapshot.totalConnected} color="emerald" />
+   361→              <StatCard icon={<PhoneCall className="w-4 h-4" />} label="Active Calls" value={snapshot.activeCalls.length} color="blue" />
+   362→              <StatCard icon={<Smartphone className="w-4 h-4" />} label="Android" value={regularPeers.filter((p) => p.device?.includes('android')).length} color="violet" />
+   363→              <StatCard icon={<Ban className="w-4 h-4" />} label="Banned" value={snapshot.bannedCount} color="red" />
+   364→            </div>
+   365→
+   366→            {/* Active Calls */}
+   367→            {snapshot.activeCalls.length > 0 && (
+   368→              <div>
+   369→                <h2 className="text-sm font-medium text-neutral-400 mb-3 flex items-center gap-2">
+   370→                  <PhoneCall className="w-4 h-4" />
+   371→                  Active Calls ({snapshot.activeCalls.length})
+   372→                </h2>
+   373→                <div className="grid gap-3">
+   374→                  {snapshot.activeCalls.map((call) => (
+   375→                    <Card key={call.id} className="bg-neutral-900/60 border-emerald-500/20">
+   376→                      <CardContent className="p-4">
+   377→                        <div className="flex items-center justify-between">
+   378→                          <div className="flex items-center gap-3">
+   379→                            <div className="flex flex-col items-center gap-1">
+   380→                              <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-emerald-400 text-xs font-bold">
+   381→                                {call.callerName.charAt(0).toUpperCase()}
+   382→                              </div>
+   383→                            </div>
+   384→                            <div className="flex items-center gap-2">
+   385→                              <span className="text-white text-sm font-medium">{call.callerName}</span>
+   386→                              <div className="w-6 h-px bg-emerald-500" />
+   387→                              <span className="text-white text-sm font-medium">{call.calleeName}</span>
+   388→                            </div>
+   389→                          </div>
+   390→                          <div className="flex items-center gap-3">
+   391→                            <div className="flex items-center gap-1.5 text-emerald-400 text-xs font-mono">
+   392→                              <Clock className="w-3 h-3" />
+   393→                              {activeCallDuration(call.startedAt)}
+   394→                            </div>
+   395→                            <Button
+   396→                              size="sm"
+   397→                              variant="ghost"
+   398→                              onClick={() => endCall(call.callerId)}
+   399→                              className="h-8 px-3 text-red-400 hover:text-red-300 hover:bg-red-500/10 text-xs"
+   400→                            >
+   401→                              <PhoneOff className="w-3.5 h-3.5 mr-1" />
+   402→                              End Call
+   403→                            </Button>
+   404→                          </div>
+   405→                        </div>
+   406→                      </CardContent>
+   407→                    </Card>
+   408→                  ))}
+   409→                </div>
+   410→              </div>
+   411→            )}
+   412→
+   413→            {/* Users list */}
+   414→            <div>
+   415→              <h2 className="text-sm font-medium text-neutral-400 mb-3 flex items-center gap-2">
+   416→                <Users className="w-4 h-4" />
+   417→                All Users ({regularPeers.length})
+   418→              </h2>
+   419→              {regularPeers.length === 0 ? (
+   420→                <Card className="bg-neutral-900/40 border-neutral-800/50">
+   421→                  <CardContent className="p-8 text-center">
+   422→                    <p className="text-neutral-500 text-sm">No users connected</p>
+   423→                  </CardContent>
+   424→                </Card>
+   425→              ) : (
+   426→                <div className="grid gap-2">
+   427→                  {regularPeers.map((peer) => (
+   428→                    <Card key={peer.id} className={`bg-neutral-900/60 border-neutral-800 hover:border-neutral-700 transition-colors ${activeCallers.has(peer.id) ? 'border-emerald-500/30' : ''}`}>
+   429→                      <CardContent className="p-3 sm:p-4 flex items-center justify-between gap-3">
+   430→                        <div className="flex items-center gap-3 min-w-0">
+   431→                          <div className={`w-9 h-9 rounded-full flex items-center justify-center text-white font-bold text-sm shrink-0 ${activeCallers.has(peer.id) ? 'bg-emerald-500/20 text-emerald-400' : 'bg-violet-500/20 text-violet-400'}`}>
+   432→                            {peer.username.charAt(0).toUpperCase()}
+   433→                          </div>
+   434→                          <div className="min-w-0">
+   435→                            <div className="flex items-center gap-2">
+   436→                              <p className="text-white text-sm font-medium truncate">{peer.username}</p>
+   437→                              {activeCallers.has(peer.id) && (
+   438→                                <Badge className="bg-emerald-500/20 text-emerald-400 border-0 text-[10px] px-1.5 py-0">IN CALL</Badge>
+   439→                              )}
+   440→                            </div>
+   441→                            <div className="flex items-center gap-2 mt-0.5">
+   442→                              {peer.device?.includes('android') ? (
+   443→                                <Smartphone className="w-3 h-3 text-neutral-500" />
+   444→                              ) : (
+   445→                                <Monitor className="w-3 h-3 text-neutral-500" />
+   446→                              )}
+   447→                              <span className="text-neutral-500 text-[11px] font-mono truncate">{peer.id.slice(0, 16)}...</span>
+   448→                              <span className="text-neutral-600 text-[11px]">{formatUptime(Date.now() - (peer.connectedAt || Date.now()))}</span>
+   449→                            </div>
+   450→                          </div>
+   451→                        </div>
+   452→                        <div className="flex items-center gap-1.5 shrink-0">
+   453→                          {activeCallers.has(peer.id) && (
+   454→                            <Button
+   455→                              size="sm"
+   456→                              variant="ghost"
+   457→                              onClick={() => endCall(peer.id)}
+   458→                              className="h-8 w-8 p-0 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+   459→                              title="End call"
+   460→                            >
+   461→                              <PhoneOff className="w-3.5 h-3.5" />
+   462→                            </Button>
+   463→                          )}
+   464→                          <Button
+   465→                            size="sm"
+   466→                            variant="ghost"
+   467→                            onClick={() => forceDisconnect(peer.id)}
+   468→                            className="h-8 w-8 p-0 text-orange-400 hover:text-orange-300 hover:bg-orange-500/10"
+   469→                            title="Force disconnect"
+   470→                          >
+   471→                            <WifiOff className="w-3.5 h-3.5" />
+   472→                          </Button>
+   473→                          <Button
+   474→                            size="sm"
+   475→                            variant="ghost"
+   476→                            onClick={() => banUser(peer.id)}
+   477→                            className="h-8 w-8 p-0 text-red-400 hover:text-red-300 hover:bg-red-500/10"
+   478→                            title="Ban user"
+   479→                          >
+   480→                            <Ban className="w-3.5 h-3.5" />
+   481→                          </Button>
+   482→                        </div>
+   483→                      </CardContent>
+   484→                    </Card>
+   485→                  ))}
+   486→                </div>
+   487→              )}
+   488→            </div>
+   489→
+   490→            {/* Footer */}
+   491→            <div className="flex justify-center pb-4">
+   492→              <div className="flex items-center gap-2 text-neutral-600 text-xs">
+   493→                <Shield className="w-3.5 h-3.5" />
+   494→                <span>Admin access. Server port 3003</span>
+   495→              </div>
+   496→            </div>
+   497→          </>
+   498→        )}
+   499→      </div>
+   500→    </div>
+   501→  )
+   502→}
+   503→
+   504→function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label: string; value: number; color: string }) {
+   505→  const colors: Record<string, string> = {
+   506→    emerald: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20',
+   507→    blue: 'bg-blue-500/10 text-blue-400 border-blue-500/20',
+   508→    violet: 'bg-violet-500/10 text-violet-400 border-violet-500/20',
+   509→    red: 'bg-red-500/10 text-red-400 border-red-500/20',
+   510→  }
+   511→  return (
+   512→    <Card className={`${colors[color] || colors.emerald} border`}>
+   513→      <CardContent className="p-4">
+   514→        <div className="flex items-center gap-2 mb-1 opacity-70">{icon}</div>
+   515→        <p className="text-2xl font-bold text-white">{value}</p>
+   516→        <p className="text-xs opacity-60 mt-0.5">{label}</p>
+   517→      </CardContent>
+   518→    </Card>
+   519→  )
+   520→}
+   521→
+   522→// ============================================================
+   523→// MAIN PAGE — LOGIN -> ADMIN DASHBOARD / VIDEO CALL
+   524→// ============================================================
+   525→
+   526→type AppMode = 'login' | 'admin' | 'call'
+   527→
+   528→export default function VideoCallPage() {
+   529→  const [mode, setMode] = useState<AppMode>('login')
+   530→  const [usernameInput, setUsernameInput] = useState('')
+   531→  const [passInput, setPassInput] = useState('')
+   532→  const [loginError, setLoginError] = useState('')
+   533→  const [copied, setCopied] = useState(false)
+   534→  const [loginScreenDone, setLoginScreenDone] = useState(false)
+   535→
+   536→  const webrtc = useWebRTC()
+   537→
+   538→  const handleAdminLogin = () => {
+   539→    if (passInput === 'admin2024') {
+   540→      setMode('admin')
+   541→      setLoginError('')
+   542→    } else {
+   543→      setLoginError('Wrong password')
+   544→    }
+   545→  }
+   546→
+   547→  const handleUserRegister = () => {
+   548→    const name = usernameInput.trim()
+   549→    if (name) {
+   550→      webrtc.register(name)
+   551→    }
+   552→  }
+   553→
+   554→  // ===== LOGIN SCREEN =====
+   555→  if (mode === 'login') {
+   556→    return (
+   557→      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950 p-4">
+   558→        <Card className="w-full max-w-md bg-neutral-900/80 border-neutral-800 backdrop-blur-xl">
+   559→          <CardContent className="p-8 space-y-6">
+   560→            <div className="flex flex-col items-center space-y-3">
+   561→              <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
+   562→                <Video className="w-8 h-8 text-emerald-400" />
+   563→              </div>
+   564→              <h1 className="text-2xl font-bold text-white tracking-tight">VideoCall</h1>
+   565→              <p className="text-neutral-400 text-sm text-center">E2E encrypted video calling</p>
+   566→            </div>
+   567→
+   568→            {/* Admin login */}
+   569→            <div className="space-y-3">
+   570→              <Input
+   571→                placeholder="Admin password"
+   572→                type="password"
+   573→                value={passInput}
+   574→                onChange={(e) => setPassInput(e.target.value)}
+   575→                onKeyDown={(e) => e.key === 'Enter' && handleAdminLogin()}
+   576→                className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-500 h-12 rounded-xl"
+   577→              />
+   578→              <Button
+   579→                onClick={handleAdminLogin}
+   580→                className="w-full h-12 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-medium gap-2"
+   581→              >
+   582→                <Shield className="w-4 h-4" />
+   583→                Admin Dashboard
+   584→              </Button>
+   585→              {loginError && (
+   586→                <p className="text-red-400 text-xs text-center flex items-center justify-center gap-1">
+   587→                  <AlertTriangle className="w-3 h-3" /> {loginError}
+   588→                </p>
+   589→              )}
+   590→            </div>
+   591→
+   592→            {/* Divider */}
+   593→            <div className="flex items-center gap-3">
+   594→              <div className="flex-1 h-px bg-neutral-800" />
+   595→              <span className="text-neutral-500 text-xs">OR</span>
+   596→              <div className="flex-1 h-px bg-neutral-800" />
+   597→            </div>
+   598→
+   599→            {/* User login */}
+   600→            <div className="space-y-3">
+   601→              <Input
+   602→                placeholder="Your name"
+   603→                value={usernameInput}
+   604→                onChange={(e) => setUsernameInput(e.target.value)}
+   605→                onKeyDown={(e) => e.key === 'Enter' && handleUserRegister()}
+   606→                className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-500 h-12 rounded-xl"
+   607→                maxLength={20}
+   608→              />
+   609→              <Button
+   610→                onClick={handleUserRegister}
+   611→                disabled={!usernameInput.trim()}
+   612→                variant="outline"
+   613→                className="w-full h-12 border-neutral-700 text-white rounded-xl font-medium hover:bg-neutral-800"
+   614→              >
+   615→                <Video className="w-4 h-4 mr-2" />
+   616→                Join as User
+   617→              </Button>
+   618→            </div>
+   619→          </CardContent>
+   620→        </Card>
+   621→      </div>
+   622→    )
+   623→  }
+   624→
+   625→  // ===== ADMIN DASHBOARD =====
+   626→  // ===== CALL MODE (user) =====
+   627→  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus } = webrtc
+   628→  const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
+   629→  const inCall = isInCall || callStatus === 'connecting' || callStatus === 'connected'
+   630→
+   631→  if (mode === 'admin') {
+   632→    return <AdminDashboard onLogout={() => setMode('login')} />
+   633→  }
+   634→
+   635→  const handleCopyId = () => {
+   636→    if (myId) { navigator.clipboard.writeText(myId); setCopied(true); setTimeout(() => setCopied(false), 2000) }
+   637→  }
+   638→
+   639→  if (!isRegistered) {
+   640→    return (
+   641→      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950">
+   642→        <div className="w-10 h-10 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+   643→      </div>
+   644→    )
+   645→  }
+   646→
+   647→  // Active call
+   648→  if (inCall) {
+   649→    return (
+   650→      <div className="min-h-screen bg-neutral-950 flex flex-col">
+   651→        <div className="flex-1 relative">
+   652→          <div className="absolute inset-0">
+   653→            <VideoPlayer stream={remoteStream} label={callStatus === 'connecting' ? 'Connecting...' : 'Remote'} className="w-full h-full" isProtected />
+   654→          </div>
+   655→          <div className="absolute top-4 right-4 w-32 h-44 sm:w-40 sm:h-56 md:w-48 md:h-64 rounded-2xl overflow-hidden shadow-2xl border-2 border-white/10 z-10">
+   656→            <VideoPlayer stream={localStream} muted label="You" mirrored className="w-full h-full" isProtected />
+   657→          </div>
+   658→          {callStatus === 'connecting' && (
+   659→            <div className="absolute inset-0 flex items-center justify-center bg-black/30 z-20">
+   660→              <div className="flex flex-col items-center gap-3">
+   661→                <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+   662→                <p className="text-white font-medium">Connecting...</p>
+   663→              </div>
+   664→            </div>
+   665→          )}
+   666→        </div>
+   667→        <div className="bg-black/80 backdrop-blur-xl px-6 py-5 flex items-center justify-center gap-4">
+   668→          <Button onClick={toggleMute} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isMuted ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
+   669→            {isMuted ? <MicOff className="w-6 h-6" /> : <Mic className="w-6 h-6" />}
+   670→          </Button>
+   671→          <Button onClick={toggleCamera} variant="ghost" size="icon" className={`w-14 h-14 rounded-full ${isCameraOff ? 'bg-red-500 hover:bg-red-600 text-white' : 'bg-white/10 hover:bg-white/20 text-white'}`}>
+   672→            {isCameraOff ? <VideoOff className="w-6 h-6" /> : <Video className="w-6 h-6" />}
+   673→          </Button>
+   674→          <Button onClick={endCall} variant="ghost" size="icon" className="w-16 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white">
+   675→            <PhoneOff className="w-6 h-6" />
+   676→          </Button>
+   677→        </div>
+   678→      </div>
+   679→    )
+   680→  }
+   681→
+   682→  // Lobby
+   683→  return (
+   684→    <div className="min-h-screen bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950">
+   685→      <div className="max-w-2xl mx-auto p-4 sm:p-6 space-y-6">
+   686→        <header className="flex items-center justify-between pt-2">
+   687→          <div className="flex items-center gap-3">
+   688→            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 flex items-center justify-center">
+   689→              <Video className="w-5 h-5 text-emerald-400" />
+   690→            </div>
+   691→            <div>
+   692→              <h1 className="text-lg font-bold text-white tracking-tight">VideoCall</h1>
+   693→              <p className="text-xs text-neutral-500">P2P encrypted calls</p>
+   694→            </div>
+   695→          </div>
+   696→          <Badge variant="secondary" className="bg-emerald-500/10 text-emerald-400 border-emerald-500/20">
+   697→            <div className="w-2 h-2 rounded-full bg-emerald-400 mr-2 animate-pulse" />
+   698→            Online
+   699→          </Badge>
+   700→        </header>
+   701→
+   702→        <Card className="bg-neutral-900/60 border-neutral-800 backdrop-blur-sm">
+   703→          <CardContent className="p-4">
+   704→            <div className="flex items-center justify-between">
+   705→              <div className="flex items-center gap-3">
+   706→                <div className="w-12 h-12 rounded-full bg-gradient-to-br from-emerald-400 to-cyan-400 flex items-center justify-center text-white font-bold text-lg">
+   707→                  {myUsername.charAt(0).toUpperCase()}
+   708→                </div>
+   709→                <div>
+   710→                  <p className="text-white font-medium">{myUsername}</p>
+   711→                  <p className="text-neutral-500 text-xs font-mono">ID: {myId?.slice(0, 8)}...</p>
+   712→                </div>
+   713→              </div>
+   714→              <Button variant="ghost" size="sm" onClick={handleCopyId} className="text-neutral-400 hover:text-white">
+   715→                {copied ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+   716→              </Button>
+   717→            </div>
+   718→          </CardContent>
+   719→        </Card>
+   720→
+   721→        <div>
+   722→          <div className="flex items-center gap-2 mb-3">
+   723→            <Users className="w-4 h-4 text-neutral-500" />
+   724→            <h2 className="text-sm font-medium text-neutral-400">Online ({peers.length})</h2>
+   725→          </div>
+   726→          {peers.length === 0 ? (
+   727→            <Card className="bg-neutral-900/40 border-neutral-800/50">
+   728→              <CardContent className="p-8 text-center">
+   729→                <Monitor className="w-10 h-10 text-neutral-700 mx-auto mb-2" />
+   730→                <p className="text-neutral-500 text-sm">No other users online</p>
+   731→              </CardContent>
+   732→            </Card>
+   733→          ) : (
+   734→            <div className="grid gap-3">
+   735→              {peers.map((peer) => (
+   736→                <Card key={peer.id} className="bg-neutral-900/60 border-neutral-800 backdrop-blur-sm hover:border-neutral-700 transition-colors">
+   737→                  <CardContent className="p-4 flex items-center justify-between">
+   738→                    <div className="flex items-center gap-3">
+   739→                      <div className="w-10 h-10 rounded-full bg-gradient-to-br from-violet-400 to-fuchsia-400 flex items-center justify-center text-white font-bold text-sm">
+   740→                        {peer.username.charAt(0).toUpperCase()}
+   741→                      </div>
+   742→                      <div>
+   743→                        <p className="text-white font-medium text-sm">{peer.username}</p>
+   744→                        <div className="flex items-center gap-1.5 mt-0.5">
+   745→                          {peer.device?.includes('android') ? <Smartphone className="w-3 h-3 text-neutral-500" /> : <Monitor className="w-3 h-3 text-neutral-500" />}
+   746→                          <p className="text-neutral-500 text-xs font-mono">{peer.id.slice(0, 12)}...</p>
+   747→                        </div>
+   748→                      </div>
+   749→                    </div>
+   750→                    <Button onClick={() => callPeer(peer.id)} className="bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl h-10 px-4">
+   751→                      <Phone className="w-4 h-4 mr-2" />
+   752→                      Call
+   753→                    </Button>
+   754→                  </CardContent>
+   755→                </Card>
+   756→              ))}
+   757→            </div>
+   758→          )}
+   759→        </div>
+   760→
+   761→        <div className="flex justify-center pt-2 pb-4">
+   762→          <div className="flex items-center gap-2 text-neutral-600 text-xs">
+   763→            {isMobile ? <Smartphone className="w-3.5 h-3.5" /> : <Monitor className="w-3.5 h-3.5" />}
+   764→            <span>{isMobile ? 'Mobile — install as app for full screen' : 'Desktop mode'}</span>
+   765→          </div>
+   766→        </div>
+   767→      </div>
+   768→
+   769→      <Dialog open={!!incomingCall}>
+   770→        <DialogContent className="bg-neutral-900 border-neutral-800 text-white sm:max-w-md">
+   771→          <DialogHeader className="text-center items-center">
+   772→            <div className="w-16 h-16 rounded-full bg-gradient-to-br from-violet-400 to-fuchsia-400 flex items-center justify-center text-white font-bold text-2xl mx-auto mb-4">
+   773→              {incomingCall?.fromName?.charAt(0).toUpperCase()}
+   774→            </div>
+   775→            <DialogTitle className="text-xl">{incomingCall?.fromName}</DialogTitle>
+   776→            <DialogDescription className="text-neutral-400">Incoming video call</DialogDescription>
+   777→          </DialogHeader>
+   778→          <div className="flex justify-center gap-4 pt-4">
+   779→            <Button onClick={rejectCall} variant="ghost" size="lg" className="w-14 h-14 rounded-full bg-red-500 hover:bg-red-600 text-white">
+   780→              <PhoneOff className="w-6 h-6" />
+   781→            </Button>
+   782→            <Button onClick={acceptCall} variant="ghost" size="lg" className="w-14 h-14 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white">
+   783→              <PhoneIncoming className="w-6 h-6" />
+   784→            </Button>
+   785→          </div>
+   786→        </DialogContent>
+   787→      </Dialog>
+   788→
+   789→      {callStatus === 'ended' && (
+   790→        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50">
+   791→          <Card className="bg-neutral-900 border-neutral-800 p-8 text-center">
+   792→            <PhoneOff className="w-12 h-12 text-red-400 mx-auto mb-3" />
+   793→            <p className="text-white font-medium">Call ended</p>
+   794→          </Card>
+   795→        </div>
+   796→      )}
+   797→    </div>
+   798→  )
+   799→}
+   800→
