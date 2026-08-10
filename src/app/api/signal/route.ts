@@ -77,7 +77,7 @@ try {
 }
 
 const ADMIN_SECRET = 'admin2024'
-const PEER_TTL = 30
+const PEER_TTL = 12
 const EVENT_TTL = 300
 const P = 'sylvid'
 
@@ -210,7 +210,7 @@ async function cleanStalePeers(): Promise<boolean> {
     }
   } else {
     for (const [id, ts] of mem.lastSeen) {
-      if (now - ts > 15000) {
+      if (now - ts > 10000) {
         const peer = mem.peers.get(id)
         if (peer) {
           if (peer.inCallWith) await endCallForPeer(id)
@@ -397,6 +397,16 @@ export async function POST(req: NextRequest) {
         if (await isBanned(username)) {
           await pushEvent(userId, 'banned', { reason: 'You have been banned' })
           break
+        }
+        // Kick any old session with the same username (handles page refresh)
+        const existing = await getAllPeers()
+        for (const p of existing) {
+          if (p.username.toLowerCase() === username.toLowerCase() && p.id !== userId) {
+            console.log(`[Sylvid] Kicking stale session for ${username}: ${p.id.slice(0,8)}`)
+            if (p.inCallWith) await endCallForPeer(p.id)
+            await pushEvent(p.id, 'force-disconnected', { reason: 'Logged in from another device' })
+            await deletePeer(p.id)
+          }
         }
         await setPeer(userId, {
           id: userId, username, device: data.device || 'web',
