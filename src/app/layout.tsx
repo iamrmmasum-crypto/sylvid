@@ -14,13 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "VideoCall — P2P Video Calling",
-  description: "Free, encrypted peer-to-peer video calling. Works on web and mobile.",
+  title: "VaultCall — Secure Encrypted Video Calls",
+  description: "Military-grade end-to-end encrypted video calling. Anti-screenshot, anti-recording. Works on web and Android.",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "VideoCall",
+    title: "VaultCall",
   },
   icons: {
     icon: "/icons/icon-192.png",

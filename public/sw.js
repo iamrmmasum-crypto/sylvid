@@ -1,4 +1,4 @@
-const CACHE_NAME = 'videocall-v1';
+const CACHE_NAME = 'vaultcall-v1';
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

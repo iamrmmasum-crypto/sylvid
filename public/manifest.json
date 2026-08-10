@@ -1,7 +1,7 @@
 {
-  "name": "VideoCall",
-  "short_name": "VideoCall",
-  "description": "P2P encrypted video calling app",
+  "name": "VaultCall",
+  "short_name": "VaultCall",
+  "description": "Military-grade encrypted video calls. Anti-screenshot, E2E secure.",
   "start_url": "/",
   "display": "standalone",
   "orientation": "portrait",
