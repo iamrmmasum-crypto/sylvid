@@ -216,7 +216,7 @@ function useWebRTC() {
     const remoteMediaStream = new MediaStream()
     remoteStreamRef.current = remoteMediaStream
     pc.ontrack = (e) => { e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t)); setRemoteStream(new MediaStream(remoteMediaStream.getTracks())) }
-    pc.onicecandidate = (e) => { if (e.candidate && socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: e.candidate.toJSON() }) }
+    pc.onicecandidate = (e) => { if (e.candidate && socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex } }) }
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') { setCallStatus('connected'); setIsInCall(true) }
       else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
@@ -236,7 +236,7 @@ function useWebRTC() {
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
       console.log('[Sylvid] Sending call-offer to', targetId)
       if (socketRef.current) {
-        socketRef.current.emit('call-offer', { targetId, offer: offer.toJSON() })
+        socketRef.current.emit('call-offer', { targetId, offer: { type: offer.type, sdp: offer.sdp } })
         setCallStatus('connecting')
       } else {
         setCallError('Not connected to server')
@@ -254,7 +254,7 @@ function useWebRTC() {
     const pc = pcRef.current; if (!pc) return
     await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
     const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
-    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: answer.toJSON() })
+    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: answer.type, sdp: answer.sdp } })
     setIncomingCall(null); setCallStatus('connecting')
   }, [incomingCall, getLocalStream, createPeerConnection])
 
