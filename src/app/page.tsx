@@ -2,6 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { useWebRTC } from '@/hooks/useWebRTC'
+import { useScreenProtection } from '@/hooks/useScreenProtection'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
@@ -34,12 +35,14 @@ function VideoPlayer({
   label,
   mirrored = false,
   className = '',
+  protected: isProtected = false,
 }: {
   stream: MediaStream | null
   muted?: boolean
   label: string
   mirrored?: boolean
   className?: string
+  protected?: boolean
 }) {
   const videoRef = useRef<HTMLVideoElement>(null)
 
@@ -55,12 +58,22 @@ function VideoPlayer({
   }, [stream])
 
   return (
-    <div className={`relative rounded-2xl overflow-hidden bg-neutral-900 ${className}`}>
+    <div
+      className={`relative rounded-2xl overflow-hidden bg-neutral-900 ${isProtected ? 'select-none pointer-events-none' : ''} ${className}`}
+      onContextMenu={(e) => isProtected && e.preventDefault()}
+    >
+      {/* Invisible overlay breaks many screenshot tools */}
+      {isProtected && (
+        <div className="absolute inset-0 z-10" aria-hidden="true" />
+      )}
       <video
         ref={videoRef}
         autoPlay
         playsInline
         muted={muted}
+        disablePictureInPicture
+        disableRemotePlayback
+        controlsList="nodownload nofullscreen noremoteplayback"
         className={`w-full h-full object-cover ${mirrored ? 'scale-x-[-1]' : ''}`}
       />
       {!stream && (
@@ -103,6 +116,8 @@ export default function VideoCallPage() {
   const [usernameInput, setUsernameInput] = useState('')
   const [copied, setCopied] = useState(false)
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
+  const inCall = isInCall || callStatus === 'connecting' || callStatus === 'connected'
+  useScreenProtection(inCall)
 
   const handleRegister = () => {
     const name = usernameInput.trim()
@@ -180,6 +195,7 @@ export default function VideoCallPage() {
               stream={remoteStream}
               label={callStatus === 'connecting' ? 'Connecting...' : 'Remote'}
               className="w-full h-full"
+              protected
             />
           </div>
 
@@ -191,6 +207,7 @@ export default function VideoCallPage() {
               label="You"
               mirrored
               className="w-full h-full"
+              protected
             />
           </div>
 

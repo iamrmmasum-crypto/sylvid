@@ -120,3 +120,16 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Block printing / PDF save of call pages */
+@media print {
+  body {
+    display: none !important;
+  }
+}
+
+/* iOS long-press save prevention */
+video {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+}
