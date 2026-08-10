@@ -12,6 +12,8 @@ interface SignalSocket {
   connected: boolean
   /** The internal user ID used for polling and signaling */
   userId: string
+  /** Backend type: 'memory' (single server) or 'kv' (Vercel KV) */
+  backend: string
 }
 
 function createSignalSocket(): SignalSocket {
@@ -21,6 +23,7 @@ function createSignalSocket(): SignalSocket {
   let lastTs = 0
   let alive = true
   let started = false
+  let backend = 'unknown'
 
   function fire(event: string, data?: any) {
     const list = handlers.get(event) || []
@@ -44,15 +47,23 @@ function createSignalSocket(): SignalSocket {
         fire('kv-error', data)
         return
       }
-      // Fire peer-list from the poll response so the client always has fresh peer data
-      // even if peer-list events are missed due to serverless routing or network issues
+      // Track backend type from server response
+      if (data.backend) backend = data.backend
+
+      // Fire peer-list from the poll response (freshest data from the server at GET time)
+      // This always takes priority over any queued peer-list events
       if (data.peers && Array.isArray(data.peers)) {
         fire('peer-list', { peers: data.peers })
       }
+      // Process queued events, but SKIP stale peer-list events — the poll
+      // response above already has the latest peer list. A queued peer-list
+      // from an earlier broadcast would overwrite the fresh data.
       const events: Array<{ type: string; data: any; ts: number }> = data.events || []
       for (const ev of events) {
         if (ev.ts > lastTs) lastTs = ev.ts
-        fire(ev.type, ev.data)
+        if (ev.type !== 'peer-list') {
+          fire(ev.type, ev.data)
+        }
       }
     } catch (e) {
       console.warn('[Sylvid] Poll network error:', e)
@@ -107,6 +118,7 @@ function createSignalSocket(): SignalSocket {
     },
     get connected() { return alive },
     get userId() { return userId },
+    get backend() { return backend },
   }
 }
 

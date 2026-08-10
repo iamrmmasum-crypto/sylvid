@@ -155,6 +155,7 @@ function useWebRTC() {
   const [callStatus, setCallStatus] = useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle')
   const [callError, setCallError] = useState('')
   const [ringTarget, setRingTarget] = useState<{ id: string; name: string } | null>(null)
+  const [backend, setBackend] = useState('unknown')
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const myIdRef = useRef<string | null>(null)
@@ -181,6 +182,12 @@ function useWebRTC() {
     // Use the socket's internal userId for self-filtering — available immediately,
     // unlike myIdRef which is only set after the 'registered' event arrives
     const selfId = socket.userId
+
+    // Poll for backend detection every second until known
+    const backendCheck = setInterval(() => {
+      const b = socket.backend
+      if (b !== 'unknown') { setBackend(b); clearInterval(backendCheck) }
+    }, 1000)
 
     socket.on('registered', (data: { id: string; username: string }) => {
       myIdRef.current = data.id
@@ -213,7 +220,7 @@ function useWebRTC() {
     socket.on('call-ended', () => { clearRingTimer(); cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) })
     socket.on('force-disconnected', () => { cleanupCall(); setCallStatus('ended'); setIsRegistered(false) })
 
-    return () => { socket.disconnect() }
+    return () => { clearInterval(backendCheck); socket.disconnect() }
   }, [])
 
   const getLocalStream = useCallback(async () => {
@@ -295,7 +302,7 @@ function useWebRTC() {
   const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
   const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
 
-  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, socketRef }
+  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, backend, socketRef }
 }
 
 // ============================================================
@@ -753,7 +760,7 @@ export default function VideoCallPage() {
 
   // ===== ADMIN DASHBOARD =====
   // ===== CALL MODE (user) =====
-  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget } = webrtc
+  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, backend } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
   const inCall = isInCall || callStatus === 'ringing' || callStatus === 'connecting' || callStatus === 'connected'
 
@@ -893,6 +900,18 @@ export default function VideoCallPage() {
             </div>
           </CardContent>
         </Card>
+
+        {backend === 'memory' && typeof window !== 'undefined' && window.location.hostname.includes('vercel.app') && (
+          <Card className="bg-orange-500/10 border-orange-500/30">
+            <CardContent className="p-3 flex items-start gap-2">
+              <AlertTriangle className="w-4 h-4 text-orange-400 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-orange-400 text-sm font-medium">Vercel KV not connected</p>
+                <p className="text-orange-400/70 text-xs mt-0.5">Users can't see each other on Vercel without KV storage. Go to Vercel Dashboard → Storage → Create KV Store, then link it to this project. Use Railway deploy for testing without KV.</p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         <div>
           <div className="flex items-center gap-2 mb-3">
