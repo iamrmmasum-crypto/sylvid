@@ -597,6 +597,7 @@ export default function VideoCallPage() {
   const handleUserRegister = () => {
     const name = usernameInput.trim()
     if (name) {
+      setMode('call')
       webrtc.register(name)
     }
   }
