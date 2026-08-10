@@ -1,4 +1,3 @@
-import { kv } from '@vercel/kv'
 import { NextRequest, NextResponse } from 'next/server'
 
 // ============================================================
@@ -31,155 +30,264 @@ interface QueuedEvent {
 }
 
 // ============================================================
-// CONSTANTS
+// DUAL BACKEND: Vercel KV (Redis) when available, globalThis otherwise
 // ============================================================
+
+// --- In-memory fallback (works on Railway, local dev) ---
+
+type InMemoryStore = {
+  peers: Map<string, PeerInfo>
+  events: Map<string, QueuedEvent[]>
+  bannedUsernames: Set<string>
+  activeCalls: Map<string, ActiveCall>
+  callCounter: number
+  lastSeen: Map<string, number>
+}
+
+const globalForStore = globalThis as unknown as { __sylvidStore?: InMemoryStore }
+if (!globalForStore.__sylvidStore) {
+  globalForStore.__sylvidStore = {
+    peers: new Map(),
+    events: new Map(),
+    bannedUsernames: new Set(),
+    activeCalls: new Map(),
+    callCounter: 0,
+    lastSeen: new Map(),
+  }
+}
+const mem = globalForStore.__sylvidStore
+
+// --- Detect if Vercel KV is available ---
+
+let kv: any = null
+let useKV = false
+
+try {
+  if (process.env.KV_REST_API_URL || process.env.KV_URL || process.env.KVC_REST_API_URL) {
+    // Dynamic import to avoid crash when @vercel/kv isn't linked
+    const mod = require('@vercel/kv')
+    kv = mod.kv
+    useKV = true
+    console.log('[Sylvid] Using Vercel KV (Redis) for signaling state')
+  } else {
+    console.log('[Sylvid] KV not detected, using in-memory state (works on Railway/persistent servers)')
+  }
+} catch {
+  console.log('[Sylvid] @vercel/kv not available, using in-memory state')
+}
 
 const ADMIN_SECRET = 'admin2024'
-const PEER_TTL = 30       // seconds — peer considered stale if no heartbeat
-const EVENT_TTL = 300      // 5 min — events auto-expire
-const P = 'sylvid'         // Redis key prefix
+const PEER_TTL = 30
+const EVENT_TTL = 300
+const P = 'sylvid'
 
 // ============================================================
-// KEY HELPERS
+// ABSTRACTION LAYER — same API for both backends
 // ============================================================
 
-const pk = (id: string) => `${P}:peer:${id}`
-const ek = (id: string) => `${P}:events:${id}`
-const sk = (id: string) => `${P}:seen:${id}`
+function pk(id: string) { return `${P}:peer:${id}` }
+function ek(id: string) { return `${P}:events:${id}` }
+function sk(id: string) { return `${P}:seen:${id}` }
 
-// ============================================================
-// REDIS HELPERS
-// ============================================================
-
+// --- pushEvent ---
 async function pushEvent(userId: string, type: string, data: any) {
   const ev: QueuedEvent = { type, data, ts: Date.now() }
-  const pipe = kv.pipeline()
-  pipe.rpush(ek(userId), JSON.stringify(ev))
-  pipe.expire(ek(userId), EVENT_TTL)
-  await pipe.exec()
-}
-
-async function getEvents(userId: string, since: number): Promise<QueuedEvent[]> {
-  const raw = (await kv.lrange(ek(userId), 0, -1)) as string[] | null
-  if (!raw || raw.length === 0) return []
-  const all: QueuedEvent[] = raw.map((s) => JSON.parse(s))
-  // Client deduplicates by timestamp, so just return filtered results
-  return all.filter((e) => e.ts > since)
-}
-
-async function setPeer(id: string, peer: PeerInfo) {
-  const pipe = kv.pipeline()
-  pipe.set(pk(id), JSON.stringify(peer))
-  pipe.sadd(`${P}:peers`, id)
-  pipe.set(sk(id), Date.now(), { ex: PEER_TTL })
-  await pipe.exec()
-}
-
-async function getPeer(id: string): Promise<PeerInfo | null> {
-  const raw = await kv.get(pk(id))
-  return raw ? (JSON.parse(raw as string) as PeerInfo) : null
-}
-
-async function deletePeer(id: string) {
-  const pipe = kv.pipeline()
-  pipe.del(pk(id), ek(id), sk(id))
-  pipe.srem(`${P}:peers`, id)
-  await pipe.exec()
-}
-
-async function getAllPeers(): Promise<PeerInfo[]> {
-  const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
-  if (!ids || ids.length === 0) return []
-
-  // Pipeline fetch all peer data in one round-trip
-  const pipe = kv.pipeline()
-  for (const id of ids) pipe.get(pk(id))
-  const results = (await pipe.exec()) as (string | null)[]
-
-  const peers: PeerInfo[] = []
-  const stale: string[] = []
-  for (let i = 0; i < ids.length; i++) {
-    if (results[i]) {
-      peers.push(JSON.parse(results[i] as string))
-    } else {
-      stale.push(ids[i])
-    }
+  if (useKV) {
+    const pipe = kv.pipeline()
+    pipe.rpush(ek(userId), JSON.stringify(ev))
+    pipe.expire(ek(userId), EVENT_TTL)
+    await pipe.exec()
+  } else {
+    if (!mem.events.has(userId)) mem.events.set(userId, [])
+    mem.events.get(userId)!.push(ev)
   }
-  // Clean orphaned index entries
-  if (stale.length > 0) await kv.srem(`${P}:peers`, ...stale)
-  return peers
 }
 
+// --- getEvents ---
+async function getEvents(userId: string, since: number): Promise<QueuedEvent[]> {
+  if (useKV) {
+    const raw = (await kv.lrange(ek(userId), 0, -1)) as string[] | null
+    if (!raw || raw.length === 0) return []
+    return raw.map((s) => JSON.parse(s)).filter((e: QueuedEvent) => e.ts > since)
+  } else {
+    const queue = mem.events.get(userId) || []
+    const newEvents = queue.filter((e) => e.ts > since)
+    mem.events.set(userId, queue.filter((e) => e.ts <= since))
+    return newEvents
+  }
+}
+
+// --- setPeer ---
+async function setPeer(id: string, peer: PeerInfo) {
+  if (useKV) {
+    const pipe = kv.pipeline()
+    pipe.set(pk(id), JSON.stringify(peer))
+    pipe.sadd(`${P}:peers`, id)
+    pipe.set(sk(id), Date.now(), { ex: PEER_TTL })
+    await pipe.exec()
+  } else {
+    mem.peers.set(id, peer)
+    mem.lastSeen.set(id, Date.now())
+  }
+}
+
+// --- getPeer ---
+async function getPeer(id: string): Promise<PeerInfo | null> {
+  if (useKV) {
+    const raw = await kv.get(pk(id))
+    return raw ? (JSON.parse(raw as string) as PeerInfo) : null
+  } else {
+    return mem.peers.get(id) || null
+  }
+}
+
+// --- deletePeer ---
+async function deletePeer(id: string) {
+  if (useKV) {
+    const pipe = kv.pipeline()
+    pipe.del(pk(id), ek(id), sk(id))
+    pipe.srem(`${P}:peers`, id)
+    await pipe.exec()
+  } else {
+    mem.peers.delete(id)
+    mem.events.delete(id)
+    mem.lastSeen.delete(id)
+  }
+}
+
+// --- getAllPeers ---
+async function getAllPeers(): Promise<PeerInfo[]> {
+  if (useKV) {
+    const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
+    if (!ids || ids.length === 0) return []
+    const pipe = kv.pipeline()
+    for (const id of ids) pipe.get(pk(id))
+    const results = (await pipe.exec()) as (string | null)[]
+    const peers: PeerInfo[] = []
+    const stale: string[] = []
+    for (let i = 0; i < ids.length; i++) {
+      if (results[i]) peers.push(JSON.parse(results[i] as string))
+      else stale.push(ids[i])
+    }
+    if (stale.length > 0) await kv.srem(`${P}:peers`, ...stale)
+    return peers
+  } else {
+    return Array.from(mem.peers.values())
+  }
+}
+
+// --- touchPeer ---
 async function touchPeer(id: string) {
-  await kv.set(sk(id), Date.now(), { ex: PEER_TTL })
+  if (useKV) {
+    await kv.set(sk(id), Date.now(), { ex: PEER_TTL })
+  } else {
+    mem.lastSeen.set(id, Date.now())
+  }
 }
 
+// --- cleanStalePeers ---
+let lastCleanTime = 0
 async function cleanStalePeers(): Promise<boolean> {
-  const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
-  if (!ids || ids.length === 0) return false
+  const now = Date.now()
+  if (now - lastCleanTime < 3000) return false
+  lastCleanTime = now
 
   let changed = false
-  for (const id of ids) {
-    const seen = await kv.get(sk(id))
-    if (!seen) {
-      const peer = await getPeer(id)
-      if (peer) {
-        if (peer.inCallWith) await endCallForPeer(id)
-        changed = true
+  if (useKV) {
+    const ids = (await kv.smembers(`${P}:peers`)) as string[] | null
+    if (!ids || ids.length === 0) return false
+    for (const id of ids) {
+      const seen = await kv.get(sk(id))
+      if (!seen) {
+        const peer = await getPeer(id)
+        if (peer) {
+          if (peer.inCallWith) await endCallForPeer(id)
+          changed = true
+        }
+        await deletePeer(id)
       }
-      await deletePeer(id)
+    }
+  } else {
+    for (const [id, ts] of mem.lastSeen) {
+      if (now - ts > 15000) {
+        const peer = mem.peers.get(id)
+        if (peer) {
+          if (peer.inCallWith) await endCallForPeer(id)
+          mem.peers.delete(id)
+          changed = true
+        }
+        mem.events.delete(id)
+        mem.lastSeen.delete(id)
+      }
     }
   }
   return changed
 }
 
-// --- Banned users ---
-
+// --- Ban ---
 async function addBan(username: string) {
-  await kv.sadd(`${P}:banned`, username.toLowerCase())
+  if (useKV) await kv.sadd(`${P}:banned`, username.toLowerCase())
+  else mem.bannedUsernames.add(username.toLowerCase())
 }
 async function removeBan(username: string) {
-  await kv.srem(`${P}:banned`, username.toLowerCase())
+  if (useKV) await kv.srem(`${P}:banned`, username.toLowerCase())
+  else mem.bannedUsernames.delete(username.toLowerCase())
 }
 async function isBanned(username: string): Promise<boolean> {
-  return (await kv.sismember(`${P}:banned`, username.toLowerCase())) === 1
+  if (useKV) return (await kv.sismember(`${P}:banned`, username.toLowerCase())) === 1
+  return mem.bannedUsernames.has(username.toLowerCase())
 }
 async function getAllBanned(): Promise<string[]> {
-  return ((await kv.smembers(`${P}:banned`)) as string[] | null) || []
+  if (useKV) return ((await kv.smembers(`${P}:banned`)) as string[] | null) || []
+  return Array.from(mem.bannedUsernames)
 }
 
-// --- Active calls ---
-
+// --- Active Calls ---
 async function addActiveCall(call: ActiveCall) {
-  const pipe = kv.pipeline()
-  pipe.sadd(`${P}:calls`, call.id)
-  pipe.set(`${P}:call:${call.id}`, JSON.stringify(call))
-  await pipe.exec()
+  if (useKV) {
+    const pipe = kv.pipeline()
+    pipe.sadd(`${P}:calls`, call.id)
+    pipe.set(`${P}:call:${call.id}`, JSON.stringify(call))
+    await pipe.exec()
+  } else {
+    mem.activeCalls.set(call.id, call)
+  }
 }
 async function removeActiveCall(callId: string) {
-  const pipe = kv.pipeline()
-  pipe.del(`${P}:call:${callId}`)
-  pipe.srem(`${P}:calls`, callId)
-  await pipe.exec()
+  if (useKV) {
+    const pipe = kv.pipeline()
+    pipe.del(`${P}:call:${callId}`)
+    pipe.srem(`${P}:calls`, callId)
+    await pipe.exec()
+  } else {
+    mem.activeCalls.delete(callId)
+  }
 }
 async function getAllActiveCalls(): Promise<ActiveCall[]> {
-  const ids = ((await kv.smembers(`${P}:calls`)) as string[] | null) || []
-  if (ids.length === 0) return []
-  const pipe = kv.pipeline()
-  for (const id of ids) pipe.get(`${P}:call:${id}`)
-  const results = (await pipe.exec()) as (string | null)[]
-  const calls: ActiveCall[] = []
-  const stale: string[] = []
-  for (let i = 0; i < ids.length; i++) {
-    if (results[i]) calls.push(JSON.parse(results[i] as string))
-    else stale.push(ids[i])
+  if (useKV) {
+    const ids = ((await kv.smembers(`${P}:calls`)) as string[] | null) || []
+    if (ids.length === 0) return []
+    const pipe = kv.pipeline()
+    for (const id of ids) pipe.get(`${P}:call:${id}`)
+    const results = (await pipe.exec()) as (string | null)[]
+    const calls: ActiveCall[] = []
+    const stale: string[] = []
+    for (let i = 0; i < ids.length; i++) {
+      if (results[i]) calls.push(JSON.parse(results[i] as string))
+      else stale.push(ids[i])
+    }
+    if (stale.length > 0) await kv.srem(`${P}:calls`, ...stale)
+    return calls
+  } else {
+    return Array.from(mem.activeCalls.values())
   }
-  if (stale.length > 0) await kv.srem(`${P}:calls`, ...stale)
-  return calls
 }
 async function generateCallId(): Promise<string> {
-  const c = await kv.incr(`${P}:cc`)
-  return `call_${c}_${Date.now()}`
+  if (useKV) {
+    const c = await kv.incr(`${P}:cc`)
+    return `call_${c}_${Date.now()}`
+  }
+  return `call_${++mem.callCounter}_${Date.now()}`
 }
 
 // ============================================================
@@ -189,15 +297,21 @@ async function generateCallId(): Promise<string> {
 async function broadcastEvent(type: string, data: any, excludeId?: string) {
   const peers = await getAllPeers()
   if (peers.length === 0) return
-  const pipe = kv.pipeline()
-  const now = Date.now()
-  for (const peer of peers) {
-    if (peer.id !== excludeId) {
-      pipe.rpush(ek(peer.id), JSON.stringify({ type, data, ts: now }))
-      pipe.expire(ek(peer.id), EVENT_TTL)
+  if (useKV) {
+    const pipe = kv.pipeline()
+    const now = Date.now()
+    for (const peer of peers) {
+      if (peer.id !== excludeId) {
+        pipe.rpush(ek(peer.id), JSON.stringify({ type, data, ts: now }))
+        pipe.expire(ek(peer.id), EVENT_TTL)
+      }
+    }
+    await pipe.exec()
+  } else {
+    for (const peer of peers) {
+      if (peer.id !== excludeId) pushEvent(peer.id, type, data)
     }
   }
-  await pipe.exec()
 }
 
 async function broadcastPeerList() {
@@ -214,7 +328,6 @@ async function broadcastAdminSnapshot() {
   const peers = await getAllPeers()
   const activeCalls = await getAllActiveCalls()
   const bannedUsernames = await getAllBanned()
-
   const snapshot = {
     peers: peers.map((p) => ({
       id: p.id, username: p.username, device: p.device,
@@ -233,16 +346,12 @@ async function broadcastAdminSnapshot() {
 async function endCallForPeer(peerId: string) {
   const peer = await getPeer(peerId)
   if (!peer || !peer.inCallWith) return
-
   const otherId = peer.inCallWith
   const other = await getPeer(otherId)
-
   await pushEvent(peerId, 'call-ended', { fromId: otherId })
   if (other) await pushEvent(otherId, 'call-ended', { fromId: peerId })
-
-  if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await kv.set(pk(peerId), JSON.stringify(peer)) }
-  if (other) { other.inCallWith = null; other.callStartedAt = null; await kv.set(pk(otherId), JSON.stringify(other)) }
-
+  if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await setPeer(peerId, peer) }
+  if (other) { other.inCallWith = null; other.callStartedAt = null; await setPeer(otherId, other) }
   const calls = await getAllActiveCalls()
   for (const call of calls) {
     if (
@@ -254,25 +363,10 @@ async function endCallForPeer(peerId: string) {
 }
 
 // ============================================================
-// KV HEALTH CHECK
-// ============================================================
-
-const kvReady = !!process.env.KV_REST_API_URL || !!process.env.KV_URL || !!process.env.KVC_REST_API_URL
-
-function kvError() {
-  return NextResponse.json({
-    error: 'Vercel KV not linked. Go to: Vercel Dashboard → Storage → Create KV Store → Link to project → Redeploy.',
-    setup: true,
-  }, { status: 503 })
-}
-
-// ============================================================
 // POST: client sends a signaling message
 // ============================================================
 
 export async function POST(req: NextRequest) {
-  if (!kvReady) return kvError()
-
   try {
     const body = await req.json()
     const { userId, type, data } = body
@@ -331,8 +425,8 @@ export async function POST(req: NextRequest) {
           id: callId, callerId: data.targetId, callerName: callee?.username || 'Unknown',
           calleeId: userId, calleeName: caller?.username || 'Unknown', startedAt: now,
         })
-        if (caller) { caller.inCallWith = data.targetId; caller.callStartedAt = now; await kv.set(pk(userId), JSON.stringify(caller)) }
-        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now; await kv.set(pk(data.targetId), JSON.stringify(callee)) }
+        if (caller) { caller.inCallWith = data.targetId; caller.callStartedAt = now; await setPeer(userId, caller) }
+        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now; await setPeer(data.targetId, callee) }
         await pushEvent(data.targetId, 'call-answered', { fromId: userId, answer: data.answer })
         await broadcastAdminSnapshot()
         break
@@ -352,8 +446,8 @@ export async function POST(req: NextRequest) {
         await pushEvent(data.targetId, 'call-ended', { fromId: userId })
         const peer = await getPeer(userId)
         const other = await getPeer(data.targetId)
-        if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await kv.set(pk(userId), JSON.stringify(peer)) }
-        if (other) { other.inCallWith = null; other.callStartedAt = null; await kv.set(pk(data.targetId), JSON.stringify(other)) }
+        if (peer) { peer.inCallWith = null; peer.callStartedAt = null; await setPeer(userId, peer) }
+        if (other) { other.inCallWith = null; other.callStartedAt = null; await setPeer(data.targetId, other) }
         const calls = await getAllActiveCalls()
         for (const call of calls) {
           if (
@@ -399,21 +493,13 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // If stale peers were cleaned, rebroadcast
     if (stale && type !== 'register' && type !== 'admin-register') {
       await broadcastPeerList()
     }
 
-    return NextResponse.json({ ok: true })
+    return NextResponse.json({ ok: true, backend: useKV ? 'kv' : 'memory' })
   } catch (error: any) {
     console.error('Signal POST error:', error)
-    const msg = error?.message || ''
-    if (msg.includes('ECONNREFUSED') || msg.includes('ENOENT') || msg.includes('fetch failed')) {
-      return NextResponse.json({
-        error: 'Cannot connect to Vercel KV. Make sure KV store is linked and redeployed.',
-        setup: true,
-      }, { status: 503 })
-    }
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }
@@ -425,20 +511,14 @@ export async function POST(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const userId = req.nextUrl.searchParams.get('u')
   const since = parseInt(req.nextUrl.searchParams.get('s') || '0')
-
   if (!userId) return NextResponse.json({ events: [] })
-
-  if (!kvReady) {
-    return NextResponse.json({ events: [], kvError: true, msg: 'Vercel KV not linked' })
-  }
 
   try {
     await touchPeer(userId)
     await cleanStalePeers()
     const newEvents = await getEvents(userId, since)
-    return NextResponse.json({ events: newEvents })
-  } catch (error: any) {
-    console.error('Signal GET error:', error)
+    return NextResponse.json({ events: newEvents, backend: useKV ? 'kv' : 'memory' })
+  } catch {
     return NextResponse.json({ events: [] })
   }
 }
