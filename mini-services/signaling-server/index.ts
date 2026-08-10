@@ -32,7 +32,7 @@ interface ActiveCall {
 }
 
 const peers = new Map<string, PeerInfo>()
-const bannedIds = new Set<string>()
+const bannedUsernames = new Set<string>() // Ban by username — persists across reconnects
 const activeCalls = new Map<string, ActiveCall>() // callId -> ActiveCall
 const ADMIN_SECRET = 'admin2024'
 let callCounter = 0
@@ -65,9 +65,11 @@ function broadcastAdminSnapshot() {
       inCallWith: p.inCallWith,
       callStartedAt: p.callStartedAt,
       connectedAt: p.connectedAt,
+      isBanned: bannedUsernames.has(p.username.replace(/^ADMIN: /, '')),
     })),
     activeCalls: Array.from(activeCalls.values()),
-    bannedCount: bannedIds.size,
+    bannedUsernames: Array.from(bannedUsernames),
+    bannedCount: bannedUsernames.size,
     totalConnected: peers.size,
   }
   io.emit('admin-snapshot', snapshot)
@@ -104,13 +106,7 @@ function endCallForPeer(peerId: string) {
 }
 
 io.on('connection', (socket) => {
-  // Check ban
-  if (bannedIds.has(socket.id)) {
-    socket.emit('banned', { reason: 'You have been banned' })
-    socket.disconnect(true)
-    return
-  }
-
+  // Can't check ban here — username not known yet; checked on 'register'
   console.log(`Peer connected: ${socket.id}`)
 
   // Admin registration
@@ -135,6 +131,12 @@ io.on('connection', (socket) => {
 
   socket.on('register', (data: { username: string; device?: string }) => {
     const { username } = data
+    // Check ban by username
+    if (bannedUsernames.has(username.toLowerCase())) {
+      socket.emit('banned', { reason: 'You have been banned from this server' })
+      setTimeout(() => socket.disconnect(true), 500)
+      return
+    }
     const device = data.device || 'web'
     peers.set(socket.id, {
       id: socket.id,
@@ -256,20 +258,22 @@ io.on('connection', (socket) => {
     const target = peers.get(data.targetId)
     if (!target || target.isAdmin) return
     if (target.inCallWith) endCallForPeer(data.targetId)
-    bannedIds.add(data.targetId)
+    // Ban by username (not socket.id) so it persists across reconnects
+    const cleanName = target.username.replace(/^ADMIN: /, '')
+    bannedUsernames.add(cleanName.toLowerCase())
     io.to(data.targetId).emit('banned', { reason: 'Banned by admin' })
     setTimeout(() => {
       const sock = io.sockets.sockets.get(data.targetId)
       if (sock) sock.disconnect(true)
     }, 500)
     broadcastAdminSnapshot()
-    console.log(`Admin banned: ${target.username} (${data.targetId})`)
+    console.log(`Admin banned username: ${cleanName}`)
   })
 
-  socket.on('admin-unban', (data: { targetId: string }) => {
-    bannedIds.delete(data.targetId)
+  socket.on('admin-unban', (data: { username: string }) => {
+    bannedUsernames.delete(data.username.toLowerCase())
     broadcastAdminSnapshot()
-    console.log(`Admin unbanned: ${data.targetId}`)
+    console.log(`Admin unbanned username: ${data.username}`)
   })
 
   socket.on('disconnect', () => {

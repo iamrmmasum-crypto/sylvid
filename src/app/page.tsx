@@ -35,6 +35,8 @@ import {
   Wifi,
   WifiOff,
   Trash2,
+  UserX,
+  RefreshCw,
 } from 'lucide-react'
 
 // ============================================================
@@ -62,8 +64,9 @@ interface ActiveCall {
 }
 
 interface AdminSnapshot {
-  peers: Peer[]
+  peers: (Peer & { isBanned?: boolean })[]
   activeCalls: ActiveCall[]
+  bannedUsernames: string[]
   bannedCount: number
   totalConnected: number
 }
@@ -264,7 +267,14 @@ function useWebRTC() {
 function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   const [snapshot, setSnapshot] = useState<AdminSnapshot | null>(null)
   const [connecting, setConnecting] = useState(true)
+  const [now, setNow] = useState(Date.now())
   const socketRef = useRef<Socket | null>(null)
+
+  // Live ticker — updates every second for call duration timers
+  useEffect(() => {
+    const interval = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(interval)
+  }, [])
 
   useEffect(() => {
     const socket = io('/?XTransformPort=3003', { transports: ['websocket', 'polling'] })
@@ -305,6 +315,10 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
     socketRef.current?.emit('admin-ban', { targetId })
   }
 
+  const unbanUser = (username: string) => {
+    socketRef.current?.emit('admin-unban', { username })
+  }
+
   const formatUptime = (ms: number) => {
     const s = Math.floor(ms / 1000)
     if (s < 60) return `${s}s`
@@ -315,7 +329,7 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
   }
 
   const activeCallDuration = (startedAt: number) => {
-    const diff = Date.now() - startedAt
+    const diff = now - startedAt
     const m = Math.floor(diff / 60000)
     const s = Math.floor((diff % 60000) / 1000)
     return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
@@ -486,6 +500,42 @@ function AdminDashboard({ onLogout }: { onLogout: () => void }) {
                 </div>
               )}
             </div>
+
+            {/* Banned Users Panel */}
+            {snapshot.bannedUsernames && snapshot.bannedUsernames.length > 0 && (
+              <div>
+                <h2 className="text-sm font-medium text-neutral-400 mb-3 flex items-center gap-2">
+                  <UserX className="w-4 h-4" />
+                  Banned Users ({snapshot.bannedUsernames.length})
+                </h2>
+                <div className="grid gap-2">
+                  {snapshot.bannedUsernames.map((name) => (
+                    <Card key={name} className="bg-red-500/5 border-red-500/20">
+                      <CardContent className="p-3 flex items-center justify-between">
+                        <div className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full bg-red-500/20 flex items-center justify-center">
+                            <Ban className="w-4 h-4 text-red-400" />
+                          </div>
+                          <div>
+                            <p className="text-white text-sm font-medium">{name}</p>
+                            <p className="text-neutral-500 text-[11px]">Cannot reconnect</p>
+                          </div>
+                        </div>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => unbanUser(name)}
+                          className="h-8 px-3 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-500/10 text-xs gap-1"
+                        >
+                          <RefreshCw className="w-3 h-3" />
+                          Unban
+                        </Button>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {/* Footer */}
             <div className="flex justify-center pb-4">
