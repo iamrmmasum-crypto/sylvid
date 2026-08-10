@@ -294,7 +294,7 @@ function useWebRTC() {
   const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
   const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
 
-  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, socketRef }
+  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, socketRef }
 }
 
 // ============================================================
@@ -752,7 +752,7 @@ export default function VideoCallPage() {
 
   // ===== ADMIN DASHBOARD =====
   // ===== CALL MODE (user) =====
-  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError } = webrtc
+  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
   const inCall = isInCall || callStatus === 'ringing' || callStatus === 'connecting' || callStatus === 'connected'
 
