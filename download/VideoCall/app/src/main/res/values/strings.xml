@@ -1,0 +1,14 @@
+<resources>
+    <string name="app_name">VideoCall</string>
+    <string name="join">Join</string>
+    <string name="your_name">Your name</string>
+    <string name="server_url">Server URL</string>
+    <string name="call">Call</string>
+    <string name="end_call">End call</string>
+    <string name="mute">Mute</string>
+    <string name="camera">Camera</string>
+    <string name="connecting">Connecting...</string>
+    <string name="ringing">Ringing...</string>
+    <string name="incoming_call">Incoming call</string>
+    <string name="no_peers">No other users online</string>
+</resources>

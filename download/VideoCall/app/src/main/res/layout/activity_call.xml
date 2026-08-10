@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000">
+
+    <!-- Remote video (full screen) -->
+    <org.webrtc.SurfaceViewRenderer
+        android:id="@+id/remoteVideoView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="invisible" />
+
+    <!-- Status text (shown while connecting) -->
+    <LinearLayout
+        android:id="@+id/statusOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical">
+
+        <ProgressBar
+            android:id="@+id/progressBar"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:indeterminateTint="#10B981" />
+
+        <TextView
+            android:id="@+id/remoteName"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#FFFFFF"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:layout_marginTop="16dp" />
+
+        <TextView
+            android:id="@+id/statusText"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:textColor="#A3A3A3"
+            android:textSize="14sp"
+            android:layout_marginTop="8dp" />
+    </LinearLayout>
+
+    <!-- Local video (PiP, top-right) -->
+    <org.webrtc.SurfaceViewRenderer
+        android:id="@+id/localVideoView"
+        android:layout_width="120dp"
+        android:layout_height="160dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="24dp"
+        android:layout_marginEnd="16dp" />
+
+    <!-- Accept/Reject (incoming call only) -->
+    <LinearLayout
+        android:id="@+id/btnAcceptGroup"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="32dp"
+        android:visibility="gone">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnRejectIncoming"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:backgroundTint="#EF4444"
+            android:cornerRadius="32dp"
+            android:icon="@drawable/ic_call_end"
+            android:iconGravity="textStart"
+            android:iconSize="28dp"
+            android:layout_marginEnd="24dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnAccept"
+            android:layout_width="64dp"
+            android:layout_height="64dp"
+            android:backgroundTint="#10B981"
+            android:cornerRadius="32dp"
+            android:icon="@drawable/ic_call_start"
+            android:iconGravity="textStart"
+            android:iconSize="28dp" />
+    </LinearLayout>
+
+    <!-- Call controls -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingBottom="48dp"
+        android:paddingTop="24dp"
+        android:background="#CC000000">
+
+        <ImageButton
+            android:id="@+id/btnMute"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:background="@drawable/bg_btn_control"
+            android:src="@drawable/ic_mic_on"
+            android:scaleType="centerInside"
+            android:padding="12dp"
+            android:contentDescription="Toggle mute"
+            android:layout_marginEnd="16dp" />
+
+        <ImageButton
+            android:id="@+id/btnCamera"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:background="@drawable/bg_btn_control"
+            android:src="@drawable/ic_cam_on"
+            android:scaleType="centerInside"
+            android:padding="12dp"
+            android:contentDescription="Toggle camera"
+            android:layout_marginEnd="16dp" />
+
+        <ImageButton
+            android:id="@+id/btnEndCall"
+            android:layout_width="72dp"
+            android:layout_height="56dp"
+            android:background="@drawable/bg_btn_end"
+            android:src="@drawable/ic_call_end"
+            android:scaleType="centerInside"
+            android:padding="12dp"
+            android:contentDescription="End call" />
+
+    </LinearLayout>
+
+</FrameLayout>

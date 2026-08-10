@@ -1,0 +1,24 @@
+[versions]
+agp = "8.7.3"
+kotlin = "2.1.0"
+coresdk = "1.15.0"
+lifecycle = "2.8.7"
+activity = "1.9.3"
+material = "1.12.0"
+constraintlayout = "2.2.0"
+socketio = "2.1.1"
+webrtc = "114.0.0"
+
+[libraries]
+core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coresdk" }
+lifecycle-runtime-ktx = { group = "androidx.lifecycle", name = "lifecycle-runtime-ktx", version.ref = "lifecycle" }
+lifecycle-viewmodel-ktx = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-ktx", version.ref = "lifecycle" }
+activity-ktx = { group = "androidx.activity", name = "activity-ktx", version.ref = "activity" }
+material = { group = "com.google.android.material", name = "material", version.ref = "material" }
+constraintlayout = { group = "androidx.constraintlayout", name = "constraintlayout", version.ref = "constraintlayout" }
+socketio = { group = "io.socket", name = "socket.io-client", version.ref = "socketio" }
+webrtc = { group = "org.webrtc", name = "google-webrtc", version.ref = "webrtc" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
