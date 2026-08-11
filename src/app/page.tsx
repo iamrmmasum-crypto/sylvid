@@ -230,7 +230,7 @@ function useWebRTC() {
       if (pc) {
         console.log('[Sylvid] Received answer, setting remote description')
         await pc.setRemoteDescription(new RTCSessionDescription(data.answer))
-        // Add any ICE candidates that arrived before the answer
+        // Add any ICE candidates that arrived before the answer (caller had PC but no remote desc)
         for (const c of bufferedIceCandidates.current) {
           try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch (e) { /* ignore */ }
         }
@@ -243,12 +243,13 @@ function useWebRTC() {
     socket.on('ice-candidate', async (data) => {
       if (!data.candidate) return
       const pc = pcRef.current
-      if (pc) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)) } catch (e) { /* ignore - will be retried via SDP */ }
+      // Only add directly if PC exists AND remote description is set
+      if (pc && pc.remoteDescription) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)) } catch (e) { /* ignore */ }
       } else {
-        // No PC yet (callee hasn't accepted) — buffer candidates
+        // No PC or no remote description yet — buffer for later
         bufferedIceCandidates.current.push(data.candidate)
-        console.log('[Sylvid] Buffered ICE candidate (no PC yet):', data.candidate.candidate?.slice(0, 50))
+        console.log('[Sylvid] Buffered ICE candidate (no remote desc):', data.candidate.candidate?.slice(0, 50))
       }
     })
 
@@ -354,13 +355,11 @@ function useWebRTC() {
       await createPeerConnection(stream, targetId)
       const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
-      console.log('[Sylvid] Waiting for ICE candidates...')
-      await waitForIce(pc)
-      console.log('[Sylvid] ICE gathering complete, sending offer to', targetId)
+      // Send offer IMMEDIATELY — trickle ICE candidates via signaling
+      const desc = pc.localDescription!
+      console.log('[Sylvid] Sending offer (trickle ICE), SDP:', desc.sdp?.length, 'chars')
       if (socketRef.current) {
-        const fullOffer = pc.localDescription
-        console.log('[Sylvid] Offer SDP length:', fullOffer?.sdp?.length, 'chars')
-        socketRef.current.emit('call-offer', { targetId, offer: { type: fullOffer!.type, sdp: fullOffer!.sdp } })
+        socketRef.current.emit('call-offer', { targetId, offer: { type: desc.type, sdp: desc.sdp } })
         setRingTarget({ id: targetId, name: targetName || 'User' })
         setCallStatus('ringing')
         // Auto-cancel if no answer within 30 seconds
@@ -389,24 +388,20 @@ function useWebRTC() {
       await createPeerConnection(stream, incomingCall.fromId)
       const pc = pcRef.current; if (!pc) return
 
-      // Add any buffered ICE candidates from the caller
-      console.log('[Sylvid] Buffered candidates to add:', bufferedIceCandidates.current.length)
-
       await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
 
-      // Add buffered candidates AFTER setting remote description
+      // Add buffered candidates from caller (arrived while callee hadn't accepted yet)
+      console.log('[Sylvid] Adding', bufferedIceCandidates.current.length, 'buffered caller candidates')
       for (const c of bufferedIceCandidates.current) {
         try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch (e) { /* ignore */ }
       }
       bufferedIceCandidates.current = []
 
+      // Send answer IMMEDIATELY — trickle ICE candidates via signaling
       const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
-      console.log('[Sylvid] Waiting for ICE candidates before answering...')
-      await waitForIce(pc, 'Answer')
-      console.log('[Sylvid] ICE complete, sending answer')
-      const fullAnswer = pc.localDescription
-      console.log('[Sylvid] Answer SDP length:', fullAnswer?.sdp?.length, 'chars')
-      socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: fullAnswer!.type, sdp: fullAnswer!.sdp } })
+      const desc = pc.localDescription!
+      console.log('[Sylvid] Sending answer (trickle ICE), SDP:', desc.sdp?.length, 'chars')
+      socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: desc.type, sdp: desc.sdp } })
       setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
     } catch (err: any) {
       console.error('[Sylvid] acceptCall error:', err)
