@@ -1,6 +1,7 @@
 'use client'
 
 import { useRef, useState, useEffect, useCallback } from 'react'
+import { useSession, signOut } from 'next-auth/react'
 import { createSignalSocket, type SignalSocket } from '@/hooks/useSignaling'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -882,90 +883,61 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
 // MAIN PAGE — LOGIN -> ADMIN DASHBOARD / VIDEO CALL
 // ============================================================
 
-type AppMode = 'login' | 'admin' | 'call'
-
-const AUTH_KEY = 'sylvid_auth'
+type AppMode = 'admin' | 'call'
 
 export default function VideoCallPage() {
-  const [mode, setMode] = useState<AppMode>('login')
-  const [usernameInput, setUsernameInput] = useState('')
+  const { data: session, status } = useSession()
+  const [mode, setMode] = useState<AppMode>('call')
   const [passInput, setPassInput] = useState('')
   const [loginError, setLoginError] = useState('')
   const [copied, setCopied] = useState(false)
-  const [loginScreenDone, setLoginScreenDone] = useState(false)
 
   const webrtc = useWebRTC()
 
-  // Restore login from localStorage on mount
+  // Auto-register with session nickname once authenticated
   useEffect(() => {
-    try {
-      const saved = localStorage.getItem(AUTH_KEY)
-      if (saved) {
-        const { mode: savedMode, username } = JSON.parse(saved)
-        if (savedMode === 'admin') {
-          setMode('admin')
-        } else if (savedMode === 'call' && username) {
-          setUsernameInput(username)
-          setMode('call')
-          // Delay register slightly to ensure socket is ready
-          setTimeout(() => webrtc.register(username), 150)
-        }
-      }
-    } catch { /* ignore */ }
-  }, [])
-
-  const saveAuth = (m: AppMode, username?: string) => {
-    try {
-      localStorage.setItem(AUTH_KEY, JSON.stringify({ mode: m, username: username || '' }))
-    } catch { /* ignore */ }
-  }
-
-  const clearAuth = () => {
-    try { localStorage.removeItem(AUTH_KEY) } catch { /* ignore */ }
-  }
+    if (status === 'authenticated' && session?.user?.nickname && !webrtc.isRegistered) {
+      webrtc.register(session.user.nickname)
+    }
+  }, [status, session?.user?.nickname, webrtc.isRegistered])
 
   const handleAdminLogin = () => {
     if (passInput === 'admin2024') {
       setMode('admin')
       setLoginError('')
-      saveAuth('admin')
     } else {
       setLoginError('Wrong password')
     }
   }
 
-  const handleUserRegister = () => {
-    const name = usernameInput.trim()
-    if (name) {
-      setMode('call')
-      saveAuth('call', name)
-      webrtc.register(name)
-    }
-  }
-
   const handleLogout = () => {
-    clearAuth()
     webrtc.socketRef.current?.disconnect()
-    setMode('login')
-    setUsernameInput('')
-    setPassInput('')
+    signOut({ callbackUrl: '/login' })
   }
 
-  // ===== LOGIN SCREEN =====
-  if (mode === 'login') {
+  // Loading state while session loads
+  if (status === 'loading') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950">
+        <div className="w-10 h-10 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  // Show admin login option (accessible via ?admin query param)
+  const isAdminMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('admin')
+  if (isAdminMode && mode !== 'admin') {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950 p-4">
-        <Card className="w-full max-w-md bg-neutral-900/80 border-neutral-800 backdrop-blur-xl">
+        <Card className="w-full max-w-sm bg-neutral-900/80 border-neutral-800 backdrop-blur-xl">
           <CardContent className="p-8 space-y-6">
             <div className="flex flex-col items-center space-y-3">
-              <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
-                <Video className="w-8 h-8 text-emerald-400" />
+              <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 flex items-center justify-center">
+                <Shield className="w-7 h-7 text-emerald-400" />
               </div>
-              <h1 className="text-2xl font-bold text-white tracking-tight">Sylvid</h1>
-              <p className="text-neutral-400 text-sm text-center">Military-grade encrypted video calls</p>
+              <h1 className="text-xl font-bold text-white">Admin Access</h1>
+              <p className="text-neutral-500 text-sm">Enter admin password</p>
             </div>
-
-            {/* Admin login */}
             <div className="space-y-3">
               <Input
                 placeholder="Admin password"
@@ -980,41 +952,13 @@ export default function VideoCallPage() {
                 className="w-full h-12 bg-emerald-500 hover:bg-emerald-600 text-white rounded-xl font-medium gap-2"
               >
                 <Shield className="w-4 h-4" />
-                Admin Dashboard
+                Enter Dashboard
               </Button>
               {loginError && (
                 <p className="text-red-400 text-xs text-center flex items-center justify-center gap-1">
                   <AlertTriangle className="w-3 h-3" /> {loginError}
                 </p>
               )}
-            </div>
-
-            {/* Divider */}
-            <div className="flex items-center gap-3">
-              <div className="flex-1 h-px bg-neutral-800" />
-              <span className="text-neutral-500 text-xs">OR</span>
-              <div className="flex-1 h-px bg-neutral-800" />
-            </div>
-
-            {/* User login */}
-            <div className="space-y-3">
-              <Input
-                placeholder="Your name"
-                value={usernameInput}
-                onChange={(e) => setUsernameInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && handleUserRegister()}
-                className="bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-500 h-12 rounded-xl"
-                maxLength={20}
-              />
-              <Button
-                onClick={handleUserRegister}
-                disabled={!usernameInput.trim()}
-                variant="outline"
-                className="w-full h-12 border-neutral-700 text-white rounded-xl font-medium hover:bg-neutral-800"
-              >
-                <Video className="w-4 h-4 mr-2" />
-                Join as User
-              </Button>
             </div>
           </CardContent>
         </Card>
@@ -1188,7 +1132,8 @@ export default function VideoCallPage() {
                 </div>
                 <div>
                   <p className="text-white font-medium">{myUsername}</p>
-                  <p className="text-neutral-500 text-xs font-mono">ID: {myId?.slice(0, 8)}...</p>
+                  <p className="text-neutral-500 text-xs">{session?.user?.email}</p>
+                  <p className="text-neutral-600 text-xs font-mono">ID: {myId?.slice(0, 8)}...</p>
                 </div>
               </div>
               <Button variant="ghost" size="sm" onClick={handleCopyId} className="text-neutral-400 hover:text-white">
