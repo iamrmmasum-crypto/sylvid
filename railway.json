@@ -1,0 +1,1 @@
+{"$schema": "https://railway.app/railway.schema.json", "build": "npm run build", "start": "npm run start", "healthcheckPath": "/api/health", "watchPaths": ["src/**"]}
