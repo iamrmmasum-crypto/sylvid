@@ -1,8 +1,6 @@
 import { NextResponse } from 'next/server'
-import { logoutCookie } from '@/lib/auth'
 
 export async function POST() {
-  const res = NextResponse.json({ success: true })
-  res.cookies.set(logoutCookie())
-  return res
+  // No server-side state to clear — client removes token from localStorage
+  return NextResponse.json({ success: true })
 }

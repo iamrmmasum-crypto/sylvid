@@ -7,6 +7,7 @@ import { Video, Mail, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
+import { saveAuth } from '@/lib/auth-context'
 
 export default function SignupPage() {
   const router = useRouter()
@@ -30,13 +31,13 @@ export default function SignupPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password, nickname }),
-        credentials: 'include',
       })
       const data = await res.json()
       if (!res.ok) {
         setError(data.error || 'Signup failed')
       } else {
-        router.push('/')
+        saveAuth(data.token, data.user)
+        window.location.href = '/'
       }
     } catch {
       setError('Something went wrong')

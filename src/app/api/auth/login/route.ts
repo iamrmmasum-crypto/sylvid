@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyUser } from '@/lib/user-store'
-import { signToken, sessionCookie } from '@/lib/auth'
+import { signToken } from '@/lib/auth'
 
 export async function POST(req: NextRequest) {
   try {
@@ -12,11 +12,14 @@ export async function POST(req: NextRequest) {
     }
 
     const user = await verifyUser(email, password)
-
     const token = await signToken({ id: user.id, email: user.email, nickname: user.nickname })
-    const res = NextResponse.json({ success: true, user: { id: user.id, email: user.email, nickname: user.nickname } })
-    res.cookies.set(sessionCookie(token))
-    return res
+
+    // Return token in response body — client stores in localStorage
+    return NextResponse.json({
+      success: true,
+      token,
+      user: { id: user.id, email: user.email, nickname: user.nickname },
+    })
   } catch (err: any) {
     const msg = err?.message || 'Invalid credentials'
     return NextResponse.json({ error: msg === 'Wrong password' ? 'Invalid email or password' : msg }, { status: 401 })

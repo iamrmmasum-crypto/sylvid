@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createUser } from '@/lib/user-store'
-import { signToken, sessionCookie } from '@/lib/auth'
+import { signToken } from '@/lib/auth'
 
 export async function POST(req: NextRequest) {
   try {
@@ -19,9 +19,12 @@ export async function POST(req: NextRequest) {
 
     const user = await createUser(email, password, nickname.trim())
     const token = await signToken({ id: user.id, email: user.email, nickname: user.nickname })
-    const res = NextResponse.json({ success: true, user: { id: user.id, email: user.email, nickname: user.nickname } })
-    res.cookies.set(sessionCookie(token))
-    return res
+
+    return NextResponse.json({
+      success: true,
+      token,
+      user: { id: user.id, email: user.email, nickname: user.nickname },
+    })
   } catch (err: any) {
     const msg = err?.message || 'Signup failed'
     const status = msg === 'Email already registered' ? 409 : 400

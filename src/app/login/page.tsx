@@ -7,6 +7,7 @@ import { Video, Mail, Lock, ArrowRight, Eye, EyeOff } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
+import { saveAuth } from '@/lib/auth-context'
 
 export default function LoginPage() {
   const router = useRouter()
@@ -27,13 +28,13 @@ export default function LoginPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
-        credentials: 'include',
       })
       const data = await res.json()
       if (!res.ok) {
         setError(data.error || 'Invalid email or password')
       } else {
-        router.push('/')
+        saveAuth(data.token, data.user)
+        window.location.href = '/'
       }
     } catch {
       setError('Something went wrong')

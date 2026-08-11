@@ -12,25 +12,39 @@ export interface AuthUser {
 interface AuthContextValue {
   user: AuthUser | null
   status: 'loading' | 'authenticated' | 'unauthenticated'
-  logout: () => Promise<void>
+  logout: () => void
 }
 
 const AuthContext = createContext<AuthContextValue>({
   user: null,
   status: 'loading',
-  logout: async () => {},
+  logout: () => {},
 })
+
+const TOKEN_KEY = 'sylvid-token'
+const USER_KEY = 'sylvid-user'
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null)
   const [status, setStatus] = useState<'loading' | 'authenticated' | 'unauthenticated'>('loading')
   const router = useRouter()
 
-  // Fetch session on mount
+  // Check localStorage on mount, verify token with server
   useEffect(() => {
-    fetch('/api/auth/me', { credentials: 'include' })
+    const storedToken = localStorage.getItem(TOKEN_KEY)
+    const storedUser = localStorage.getItem(USER_KEY)
+
+    if (!storedToken || !storedUser) {
+      setStatus('unauthenticated')
+      return
+    }
+
+    // Verify token is still valid via server
+    fetch('/api/auth/me', {
+      headers: { 'Authorization': `Bearer ${storedToken}` },
+    })
       .then((res) => {
-        if (!res.ok) throw new Error('Not authenticated')
+        if (!res.ok) throw new Error('Invalid')
         return res.json()
       })
       .then((data) => {
@@ -38,20 +52,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           setUser(data.user)
           setStatus('authenticated')
         } else {
+          localStorage.removeItem(TOKEN_KEY)
+          localStorage.removeItem(USER_KEY)
           setStatus('unauthenticated')
         }
       })
       .catch(() => {
+        localStorage.removeItem(TOKEN_KEY)
+        localStorage.removeItem(USER_KEY)
         setStatus('unauthenticated')
       })
   }, [])
 
-  const logout = useCallback(async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' })
-    } catch {
-      // ignore network errors
-    }
+  const logout = useCallback(() => {
+    localStorage.removeItem(TOKEN_KEY)
+    localStorage.removeItem(USER_KEY)
     setUser(null)
     setStatus('unauthenticated')
     router.push('/login')
@@ -62,6 +77,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       {children}
     </AuthContext.Provider>
   )
+}
+
+/** Helper: save token+user after login/signup */
+export function saveAuth(token: string, user: AuthUser) {
+  localStorage.setItem(TOKEN_KEY, token)
+  localStorage.setItem(USER_KEY, JSON.stringify(user))
+}
+
+/** Helper: get stored token for API calls */
+export function getToken(): string | null {
+  return localStorage.getItem(TOKEN_KEY)
 }
 
 export function useAuth() {
