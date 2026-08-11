@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { verifyToken } from '@/lib/auth'
+import { verifyToken, COOKIE_NAME } from '@/lib/auth'
 
 export async function GET(req: NextRequest) {
-  // Read token from Authorization header (primary) or cookie (fallback)
+  // Try Authorization header first, then cookie
   const authHeader = req.headers.get('authorization')
-  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined
+  let token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : undefined
+
+  if (!token) {
+    token = req.cookies.get(COOKIE_NAME)?.value
+  }
 
   if (!token) {
     return NextResponse.json({ user: null }, { status: 401 })

@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createUser } from '@/lib/user-store'
-import { signToken } from '@/lib/auth'
+import { signToken, sessionCookie } from '@/lib/auth'
 
 export async function POST(req: NextRequest) {
   try {
@@ -20,11 +20,20 @@ export async function POST(req: NextRequest) {
     const user = await createUser(email, password, nickname.trim())
     const token = await signToken({ id: user.id, email: user.email, nickname: user.nickname })
 
-    return NextResponse.json({
-      success: true,
-      token,
-      user: { id: user.id, email: user.email, nickname: user.nickname },
-    })
+    // Build response with httpOnly cookie
+    const cookie = sessionCookie(token)
+    return NextResponse.json(
+      {
+        success: true,
+        token,
+        user: { id: user.id, email: user.email, nickname: user.nickname },
+      },
+      {
+        headers: {
+          'Set-Cookie': `${cookie.name}=${cookie.value}; HttpOnly; ${cookie.secure ? 'Secure; ' : ''}SameSite=${cookie.sameSite}; Path=${cookie.path}; Max-Age=${cookie.maxAge}`,
+        },
+      }
+    )
   } catch (err: any) {
     const msg = err?.message || 'Signup failed'
     const status = msg === 'Email already registered' ? 409 : 400
