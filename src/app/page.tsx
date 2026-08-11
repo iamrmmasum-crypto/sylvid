@@ -924,6 +924,18 @@ export default function VideoCallPage() {
     )
   }
 
+  // Not authenticated — redirect to login (defense-in-depth, middleware should handle this)
+  if (status === 'unauthenticated') {
+    if (typeof window !== 'undefined') {
+      window.location.href = '/login'
+    }
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-neutral-950 via-neutral-900 to-neutral-950">
+        <div className="w-10 h-10 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
   // Show admin login option (accessible via ?admin query param)
   const isAdminMode = typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('admin')
   if (isAdminMode && mode !== 'admin') {
