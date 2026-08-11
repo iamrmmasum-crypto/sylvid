@@ -419,18 +419,37 @@ export async function POST(req: NextRequest) {
 
       case 'call-offer': {
         const caller = await getPeer(userId)
-        const callee = await getPeer(data.targetId)
-        console.log(`[Sylvid] call-offer from ${caller?.username}(${userId.slice(0,8)}) → target ${data.targetId.slice(0,8)}, callee found: ${!!callee}`)
+        let targetId = data.targetId
+        let callee = await getPeer(targetId)
+        console.log(`[Sylvid] call-offer from ${caller?.username}(${userId.slice(0,8)}) → target ${targetId.slice(0,8)}, callee found: ${!!callee}`)
+        // If target ID not found, try to find the user's current session by username
+        // (handles mobile reconnects where the ID changes but username is the same)
+        if (!callee && data.targetUsername) {
+          const allPeers = await getAllPeers()
+          const match = allPeers.find(p => p.username.toLowerCase() === data.targetUsername.toLowerCase() && p.id !== userId)
+          if (match) {
+            console.log(`[Sylvid] Target ID stale, resolved ${data.targetUsername} → current session ${match.id.slice(0,8)}`)
+            callee = match
+            targetId = match.id
+          }
+        }
         if (!callee) { console.log(`[Sylvid] callee NOT FOUND for ${data.targetId}`); break }
-        await pushEvent(data.targetId, 'incoming-call', {
+        await pushEvent(targetId, 'incoming-call', {
           fromId: userId, fromName: caller?.username || 'Unknown', offer: data.offer,
         })
         break
       }
 
       case 'call-answer': {
-        const caller = await getPeer(userId)
-        const callee = await getPeer(data.targetId)
+        let targetId = data.targetId
+        let caller = await getPeer(userId)
+        let callee = await getPeer(targetId)
+        // Resolve stale ID by username if needed
+        if (!callee && data.targetUsername) {
+          const allPeers = await getAllPeers()
+          const match = allPeers.find(p => p.username.toLowerCase() === data.targetUsername.toLowerCase() && p.id !== userId)
+          if (match) { callee = match; targetId = match.id }
+        }
         if (!callee) break
         const callId = await generateCallId()
         const now = Date.now()
@@ -438,15 +457,23 @@ export async function POST(req: NextRequest) {
           id: callId, callerId: data.targetId, callerName: callee?.username || 'Unknown',
           calleeId: userId, calleeName: caller?.username || 'Unknown', startedAt: now,
         })
-        if (caller) { caller.inCallWith = data.targetId; caller.callStartedAt = now; await setPeer(userId, caller) }
-        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now; await setPeer(data.targetId, callee) }
-        await pushEvent(data.targetId, 'call-answered', { fromId: userId, answer: data.answer })
+        if (caller) { caller.inCallWith = targetId; caller.callStartedAt = now; await setPeer(userId, caller) }
+        if (callee) { callee.inCallWith = userId; callee.callStartedAt = now; await setPeer(targetId, callee) }
+        await pushEvent(targetId, 'call-answered', { fromId: userId, answer: data.answer })
         await broadcastAdminSnapshot()
         break
       }
 
       case 'ice-candidate': {
-        await pushEvent(data.targetId, 'ice-candidate', { fromId: userId, candidate: data.candidate })
+        let iceTargetId = data.targetId
+        let iceTarget = await getPeer(iceTargetId)
+        // Resolve stale ID by username if needed
+        if (!iceTarget && data.targetUsername) {
+          const allPeers = await getAllPeers()
+          const match = allPeers.find(p => p.username.toLowerCase() === data.targetUsername.toLowerCase() && p.id !== userId)
+          if (match) iceTargetId = match.id
+        }
+        await pushEvent(iceTargetId, 'ice-candidate', { fromId: userId, candidate: data.candidate })
         break
       }
 

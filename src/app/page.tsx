@@ -155,6 +155,7 @@ function useWebRTC() {
   const localStreamRef = useRef<MediaStream | null>(null)
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const remotePeerIdRef = useRef<string | null>(null)
+  const remotePeerNameRef = useRef<string | null>(null)
   const turnServersRef = useRef<RTCIceServer[]>([])
 
   const [peers, setPeers] = useState<Peer[]>([])
@@ -194,6 +195,7 @@ function useWebRTC() {
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
     remoteStreamRef.current = null
     remotePeerIdRef.current = null
+    remotePeerNameRef.current = null
     setRemoteStream(null); setLocalStream(null); setIsInCall(false)
     setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
     setRingTarget(null); setCallError('')
@@ -382,7 +384,7 @@ function useWebRTC() {
     }
   }, [])
 
-  const createPeerConnection = useCallback(async (stream: MediaStream, remotePeerId: string) => {
+  const createPeerConnection = useCallback(async (remotePeerId: string, localStream?: MediaStream, remotePeerName?: string) => {
     bufferedIceCandidates.current = []
     // Fetch fresh TURN credentials for each call
     const turnServers = await fetchTurnServers()
@@ -394,8 +396,27 @@ function useWebRTC() {
         ...turnServers,
       ]
     })
-    pcRef.current = pc; remotePeerIdRef.current = remotePeerId
-    stream.getTracks().forEach((t) => pc.addTrack(t, stream))
+    pcRef.current = pc; remotePeerIdRef.current = remotePeerId; remotePeerNameRef.current = remotePeerName || null
+    // Add local tracks if we have a stream (may be undefined if camera failed)
+    if (localStream) {
+      localStream.getTracks().forEach((t) => pc.addTrack(t, localStream))
+    } else {
+      // No camera — add a silent audio track so the connection has a media component
+      // This is needed because the offer has audio/video, and without at least one track
+      // the peer connection may not establish properly
+      console.log('[Sylvid] No local stream — adding recvonly silent track')
+      const silentAudio = new AudioContext().createMediaStreamDestination()
+      const osc = silentAudio.context.createOscillator()
+      osc.frequency.value = 0 // silence
+      const gain = silentAudio.context.createGain()
+      gain.gain.value = 0
+      osc.connect(gain).connect(silentAudio)
+      osc.start()
+      silentAudio.stream.getAudioTracks().forEach((t) => {
+        t.enabled = false
+        pc.addTrack(t, silentAudio.stream)
+      })
+    }
     const remoteMediaStream = new MediaStream()
     remoteStreamRef.current = remoteMediaStream
     pc.ontrack = (e) => {
@@ -410,6 +431,7 @@ function useWebRTC() {
         console.log(`[Sylvid] ICE candidate #${candidateCount}: ${e.candidate.type}`, e.candidate.candidate?.slice(0, 80))
         if (socketRef.current) socketRef.current.emit('ice-candidate', {
           targetId: remotePeerId,
+          targetUsername: remotePeerNameRef.current || undefined,
           candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex }
         })
       } else {
@@ -450,18 +472,25 @@ function useWebRTC() {
   })
 
   const callPeer = useCallback(async (targetId: string, targetName?: string) => {
-    setCallError('')
+    setCallError(''); setCameraError(null)
+    console.log('[Sylvid] Calling:', targetId, targetName)
+    let localStream: MediaStream | undefined
     try {
-      console.log('[Sylvid] Calling:', targetId, targetName)
-      const stream = await getLocalStream()
-      await createPeerConnection(stream, targetId)
+      localStream = await getLocalStream()
+      localStreamRef.current = localStream; setLocalStream(localStream)
+    } catch (camErr: any) {
+      console.warn('[Sylvid] Camera failed on call — continuing without local video:', camErr?.message)
+      // Don't throw — continue to establish connection so we can at least SEE the other person
+    }
+    try {
+      await createPeerConnection(targetId, localStream, targetName)
       const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
       // Send offer IMMEDIATELY — trickle ICE candidates via signaling
       const desc = pc.localDescription!
-      console.log('[Sylvid] Sending offer (trickle ICE), SDP:', desc.sdp?.length, 'chars')
+      console.log('[Sylvid] Sending offer (trickle ICE), SDP:', desc.sdp?.length, 'chars', localStream ? '' : '[NO LOCAL VIDEO]')
       if (socketRef.current) {
-        socketRef.current.emit('call-offer', { targetId, offer: { type: desc.type, sdp: desc.sdp } })
+        socketRef.current.emit('call-offer', { targetId, targetUsername: targetName, offer: { type: desc.type, sdp: desc.sdp } })
         setRingTarget({ id: targetId, name: targetName || 'User' })
         setCallStatus('ringing')
         // Auto-cancel if no answer within 30 seconds
@@ -480,17 +509,26 @@ function useWebRTC() {
       console.error('[Sylvid] callPeer error:', err)
       setCallError(err?.message || 'Call failed')
     }
-  }, [getLocalStream, createPeerConnection, fetchTurnServers, clearRingTimer, cleanupCall])
+  }, [createPeerConnection, clearRingTimer, cleanupCall])
 
   const acceptCall = useCallback(async () => {
     if (!incomingCall) return
+    setCallError(''); setCameraError(null)
+    const callInfo = incomingCall // capture before clearing
+    console.log('[Sylvid] Accepting call from', callInfo.fromName)
+    let localStream: MediaStream | undefined
     try {
-      console.log('[Sylvid] Accepting call from', incomingCall.fromName)
-      const stream = await getLocalStream()
-      await createPeerConnection(stream, incomingCall.fromId)
+      localStream = await getLocalStream()
+      localStreamRef.current = localStream; setLocalStream(localStream)
+    } catch (camErr: any) {
+      console.warn('[Sylvid] Camera failed on accept — continuing without local video:', camErr?.message)
+      // Don't throw — we MUST send the answer so the caller doesn't time out
+    }
+    try {
+      await createPeerConnection(callInfo.fromId, localStream, callInfo.fromName)
       const pc = pcRef.current; if (!pc) return
 
-      await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
+      await pc.setRemoteDescription(new RTCSessionDescription(callInfo.offer))
 
       // Add buffered candidates from caller (arrived while callee hadn't accepted yet)
       console.log('[Sylvid] Adding', bufferedIceCandidates.current.length, 'buffered caller candidates')
@@ -502,14 +540,14 @@ function useWebRTC() {
       // Send answer IMMEDIATELY — trickle ICE candidates via signaling
       const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
       const desc = pc.localDescription!
-      console.log('[Sylvid] Sending answer (trickle ICE), SDP:', desc.sdp?.length, 'chars')
-      socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: desc.type, sdp: desc.sdp } })
+      console.log('[Sylvid] Sending answer (trickle ICE), SDP:', desc.sdp?.length, 'chars', localStream ? '' : '[NO LOCAL VIDEO]')
+      socketRef.current?.emit('call-answer', { targetId: callInfo.fromId, answer: { type: desc.type, sdp: desc.sdp } })
       setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
     } catch (err: any) {
       console.error('[Sylvid] acceptCall error:', err)
       setCallError(err?.message || 'Accept failed')
     }
-  }, [incomingCall, getLocalStream, createPeerConnection, fetchTurnServers, startConnectTimer])
+  }, [incomingCall, createPeerConnection, startConnectTimer])
 
   const rejectCall = useCallback(() => {
     if (incomingCall && socketRef.current) socketRef.current.emit('call-rejected', { targetId: incomingCall.fromId })
