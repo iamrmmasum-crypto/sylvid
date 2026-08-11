@@ -158,6 +158,7 @@ function useWebRTC() {
   const [backend, setBackend] = useState('unknown')
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const bufferedIceCandidates = useRef<RTCIceCandidateInit[]>([])
 
   const myIdRef = useRef<string | null>(null)
 
@@ -172,13 +173,14 @@ function useWebRTC() {
   const cleanupCall = useCallback(() => {
     clearRingTimer()
     clearConnectTimer()
+    bufferedIceCandidates.current = []
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
     remoteStreamRef.current = null
     remotePeerIdRef.current = null
     setRemoteStream(null); setLocalStream(null); setIsInCall(false)
     setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
-    setRingTarget(null)
+    setRingTarget(null); setCallError('')
   }, [clearRingTimer, clearConnectTimer])
 
   const startConnectTimer = useCallback(() => {
@@ -221,13 +223,28 @@ function useWebRTC() {
     socket.on('call-answered', async (data) => {
       clearRingTimer()
       const pc = pcRef.current
-      if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(data.answer)); setCallStatus('connecting'); startConnectTimer() }
+      if (pc) {
+        console.log('[Sylvid] Received answer, setting remote description')
+        await pc.setRemoteDescription(new RTCSessionDescription(data.answer))
+        // Add any ICE candidates that arrived before the answer
+        for (const c of bufferedIceCandidates.current) {
+          try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch (e) { /* ignore */ }
+        }
+        bufferedIceCandidates.current = []
+        console.log('[Sylvid] Answer set, transitioning to connecting')
+        setCallStatus('connecting'); startConnectTimer()
+      }
     })
 
     socket.on('ice-candidate', async (data) => {
+      if (!data.candidate) return
       const pc = pcRef.current
-      if (pc && data.candidate) {
-        try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)) } catch (e) { /* ignore */ }
+      if (pc) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(data.candidate)) } catch (e) { /* ignore - will be retried via SDP */ }
+      } else {
+        // No PC yet (callee hasn't accepted) — buffer candidates
+        bufferedIceCandidates.current.push(data.candidate)
+        console.log('[Sylvid] Buffered ICE candidate (no PC yet):', data.candidate.candidate?.slice(0, 50))
       }
     })
 
@@ -244,38 +261,68 @@ function useWebRTC() {
   }, [])
 
   const createPeerConnection = useCallback((stream: MediaStream, remotePeerId: string) => {
+    bufferedIceCandidates.current = []
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
-        // Free TURN relay for users behind symmetric NAT (mobile data, corporate firewalls)
-        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' },
       ]
     })
     pcRef.current = pc; remotePeerIdRef.current = remotePeerId
     stream.getTracks().forEach((t) => pc.addTrack(t, stream))
     const remoteMediaStream = new MediaStream()
     remoteStreamRef.current = remoteMediaStream
-    pc.ontrack = (e) => { console.log('[Sylvid] Remote track received:', e.track.kind); e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t)); setRemoteStream(new MediaStream(remoteMediaStream.getTracks())) }
-    pc.onicecandidate = (e) => { if (e.candidate) { console.log('[Sylvid] ICE candidate:', e.candidate.type, e.candidate.candidate?.slice(0, 60)); if (socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex } }) } }
-    pc.oniceconnectionstatechange = () => { console.log('[Sylvid] ICE state:', pc.iceConnectionState) }
+    pc.ontrack = (e) => {
+      console.log('[Sylvid] Remote track received:', e.track.kind, e.streams.length, 'stream(s)')
+      e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t))
+      setRemoteStream(new MediaStream(remoteMediaStream.getTracks()))
+    }
+    let candidateCount = 0
+    pc.onicecandidate = (e) => {
+      if (e.candidate) {
+        candidateCount++
+        console.log(`[Sylvid] ICE candidate #${candidateCount}: ${e.candidate.type}`, e.candidate.candidate?.slice(0, 80))
+        if (socketRef.current) socketRef.current.emit('ice-candidate', {
+          targetId: remotePeerId,
+          candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex }
+        })
+      } else {
+        console.log(`[Sylvid] ICE gathering complete — ${candidateCount} candidates gathered`)
+      }
+    }
+    pc.oniceconnectionstatechange = () => {
+      console.log('[Sylvid] ICE connection state:', pc.iceConnectionState)
+    }
     pc.onconnectionstatechange = () => {
       console.log('[Sylvid] Connection state:', pc.connectionState)
       if (pc.connectionState === 'connected') { clearConnectTimer(); setCallStatus('connected'); setIsInCall(true) }
-      else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
+      else if (pc.connectionState === 'failed') {
+        console.error('[Sylvid] WebRTC connection FAILED — likely NAT/firewall issue')
+        setCallError('Connection failed. Both users should be on WiFi for best results.')
+        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
+      }
+      else if (['disconnected', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
     }
     return pc
-  }, [cleanupCall, getLocalStream])
+  }, [cleanupCall, clearConnectTimer, getLocalStream])
 
   const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
 
-  const waitForIce = (pc: RTCPeerConnection): Promise<void> => new Promise((resolve) => {
-    if (pc.iceGatheringState === 'complete') return resolve()
-    const timeout = setTimeout(() => { pc.removeEventListener('icegatheringstatechange', check); resolve() }, 5000)
-    const check = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(timeout); pc.removeEventListener('icegatheringstatechange', check); resolve() } }
+  const waitForIce = (pc: RTCPeerConnection, label = 'ICE'): Promise<void> => new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') { console.log(`[Sylvid] ${label} already complete`); return resolve() }
+    const timeout = setTimeout(() => {
+      console.warn(`[Sylvid] ${label} gathering timed out after 10s (state: ${pc.iceGatheringState})`)
+      pc.removeEventListener('icegatheringstatechange', check); resolve()
+    }, 10000)
+    const check = () => {
+      if (pc.iceGatheringState === 'complete') {
+        console.log(`[Sylvid] ${label} gathering completed`)
+        clearTimeout(timeout); pc.removeEventListener('icegatheringstatechange', check); resolve()
+      }
+    }
     pc.addEventListener('icegatheringstatechange', check)
   })
 
@@ -292,6 +339,7 @@ function useWebRTC() {
       console.log('[Sylvid] ICE gathering complete, sending offer to', targetId)
       if (socketRef.current) {
         const fullOffer = pc.localDescription
+        console.log('[Sylvid] Offer SDP length:', fullOffer?.sdp?.length, 'chars')
         socketRef.current.emit('call-offer', { targetId, offer: { type: fullOffer!.type, sdp: fullOffer!.sdp } })
         setRingTarget({ id: targetId, name: targetName || 'User' })
         setCallStatus('ringing')
@@ -315,17 +363,35 @@ function useWebRTC() {
 
   const acceptCall = useCallback(async () => {
     if (!incomingCall) return
-    const stream = await getLocalStream()
-    createPeerConnection(stream, incomingCall.fromId)
-    const pc = pcRef.current; if (!pc) return
-    await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
-    const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
-    console.log('[Sylvid] Waiting for ICE candidates before answering...')
-    await waitForIce(pc)
-    console.log('[Sylvid] ICE complete, sending answer')
-    const fullAnswer = pc.localDescription
-    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: fullAnswer!.type, sdp: fullAnswer!.sdp } })
-    setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
+    try {
+      console.log('[Sylvid] Accepting call from', incomingCall.fromName)
+      const stream = await getLocalStream()
+      createPeerConnection(stream, incomingCall.fromId)
+      const pc = pcRef.current; if (!pc) return
+
+      // Add any buffered ICE candidates from the caller
+      console.log('[Sylvid] Buffered candidates to add:', bufferedIceCandidates.current.length)
+
+      await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
+
+      // Add buffered candidates AFTER setting remote description
+      for (const c of bufferedIceCandidates.current) {
+        try { await pc.addIceCandidate(new RTCIceCandidate(c)) } catch (e) { /* ignore */ }
+      }
+      bufferedIceCandidates.current = []
+
+      const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
+      console.log('[Sylvid] Waiting for ICE candidates before answering...')
+      await waitForIce(pc, 'Answer')
+      console.log('[Sylvid] ICE complete, sending answer')
+      const fullAnswer = pc.localDescription
+      console.log('[Sylvid] Answer SDP length:', fullAnswer?.sdp?.length, 'chars')
+      socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: fullAnswer!.type, sdp: fullAnswer!.sdp } })
+      setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
+    } catch (err: any) {
+      console.error('[Sylvid] acceptCall error:', err)
+      setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Accept failed: ${err?.message || err}`)
+    }
   }, [incomingCall, getLocalStream, createPeerConnection, startConnectTimer])
 
   const rejectCall = useCallback(() => {
