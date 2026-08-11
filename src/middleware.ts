@@ -1,9 +1,23 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { verifyToken, COOKIE_NAME } from '@/lib/auth'
 
+function getTokenFromRequest(req: NextRequest): string | undefined {
+  // Try NextRequest cookies API first
+  const fromCookies = req.cookies.get(COOKIE_NAME)?.value
+  if (fromCookies) return fromCookies
+
+  // Fallback: parse raw Cookie header manually (for standalone server compat)
+  const cookieHeader = req.headers.get('cookie') || ''
+  const match = cookieHeader.split(';').find(c => c.trim().startsWith(`${COOKIE_NAME}=`))
+  if (match) {
+    return match.split('=').slice(1).join('=').trim()
+  }
+  return undefined
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
-  const token = req.cookies.get(COOKIE_NAME)?.value
+  const token = getTokenFromRequest(req)
 
   // Public routes (no auth required)
   const publicRoutes = ['/login', '/signup', '/api/auth']
