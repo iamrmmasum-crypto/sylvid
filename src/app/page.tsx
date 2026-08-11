@@ -157,6 +157,7 @@ function useWebRTC() {
   const [ringTarget, setRingTarget] = useState<{ id: string; name: string } | null>(null)
   const [backend, setBackend] = useState('unknown')
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const myIdRef = useRef<string | null>(null)
 
@@ -164,8 +165,13 @@ function useWebRTC() {
     if (ringTimerRef.current) { clearTimeout(ringTimerRef.current); ringTimerRef.current = null }
   }, [])
 
+  const clearConnectTimer = useCallback(() => {
+    if (connectTimerRef.current) { clearTimeout(connectTimerRef.current); connectTimerRef.current = null }
+  }, [])
+
   const cleanupCall = useCallback(() => {
     clearRingTimer()
+    clearConnectTimer()
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
     remoteStreamRef.current = null
@@ -173,7 +179,16 @@ function useWebRTC() {
     setRemoteStream(null); setLocalStream(null); setIsInCall(false)
     setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
     setRingTarget(null)
-  }, [clearRingTimer])
+  }, [clearRingTimer, clearConnectTimer])
+
+  const startConnectTimer = useCallback(() => {
+    clearConnectTimer()
+    connectTimerRef.current = setTimeout(() => {
+      console.error('[Sylvid] Connection timeout — WebRTC failed to establish after 15s')
+      setCallError('Connection failed — could not reach the other user. Try again.')
+      cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 3000)
+    }, 15000)
+  }, [clearConnectTimer, cleanupCall])
 
   useEffect(() => {
     const socket = createSignalSocket()
@@ -206,7 +221,7 @@ function useWebRTC() {
     socket.on('call-answered', async (data) => {
       clearRingTimer()
       const pc = pcRef.current
-      if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(data.answer)); setCallStatus('connecting') }
+      if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(data.answer)); setCallStatus('connecting'); startConnectTimer() }
     })
 
     socket.on('ice-candidate', async (data) => {
@@ -230,16 +245,26 @@ function useWebRTC() {
 
   const createPeerConnection = useCallback((stream: MediaStream, remotePeerId: string) => {
     const pc = new RTCPeerConnection({
-      iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }]
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        // Free TURN relay for users behind symmetric NAT (mobile data, corporate firewalls)
+        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' },
+      ]
     })
     pcRef.current = pc; remotePeerIdRef.current = remotePeerId
     stream.getTracks().forEach((t) => pc.addTrack(t, stream))
     const remoteMediaStream = new MediaStream()
     remoteStreamRef.current = remoteMediaStream
-    pc.ontrack = (e) => { e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t)); setRemoteStream(new MediaStream(remoteMediaStream.getTracks())) }
-    pc.onicecandidate = (e) => { if (e.candidate && socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex } }) }
+    pc.ontrack = (e) => { console.log('[Sylvid] Remote track received:', e.track.kind); e.streams[0].getTracks().forEach((t) => remoteMediaStream.addTrack(t)); setRemoteStream(new MediaStream(remoteMediaStream.getTracks())) }
+    pc.onicecandidate = (e) => { if (e.candidate) { console.log('[Sylvid] ICE candidate:', e.candidate.type, e.candidate.candidate?.slice(0, 60)); if (socketRef.current) socketRef.current.emit('ice-candidate', { targetId: remotePeerId, candidate: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex } }) } }
+    pc.oniceconnectionstatechange = () => { console.log('[Sylvid] ICE state:', pc.iceConnectionState) }
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'connected') { setCallStatus('connected'); setIsInCall(true) }
+      console.log('[Sylvid] Connection state:', pc.connectionState)
+      if (pc.connectionState === 'connected') { clearConnectTimer(); setCallStatus('connected'); setIsInCall(true) }
       else if (['disconnected', 'failed', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
     }
     return pc
@@ -266,7 +291,8 @@ function useWebRTC() {
       await waitForIce(pc)
       console.log('[Sylvid] ICE gathering complete, sending offer to', targetId)
       if (socketRef.current) {
-        socketRef.current.emit('call-offer', { targetId, offer: { type: offer.type, sdp: offer.sdp } })
+        const fullOffer = pc.localDescription
+        socketRef.current.emit('call-offer', { targetId, offer: { type: fullOffer!.type, sdp: fullOffer!.sdp } })
         setRingTarget({ id: targetId, name: targetName || 'User' })
         setCallStatus('ringing')
         // Auto-cancel if no answer within 30 seconds
@@ -297,9 +323,10 @@ function useWebRTC() {
     console.log('[Sylvid] Waiting for ICE candidates before answering...')
     await waitForIce(pc)
     console.log('[Sylvid] ICE complete, sending answer')
-    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: answer.type, sdp: answer.sdp } })
-    setIncomingCall(null); setCallStatus('connecting')
-  }, [incomingCall, getLocalStream, createPeerConnection])
+    const fullAnswer = pc.localDescription
+    socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: fullAnswer!.type, sdp: fullAnswer!.sdp } })
+    setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
+  }, [incomingCall, getLocalStream, createPeerConnection, startConnectTimer])
 
   const rejectCall = useCallback(() => {
     if (incomingCall && socketRef.current) socketRef.current.emit('call-rejected', { targetId: incomingCall.fromId })
