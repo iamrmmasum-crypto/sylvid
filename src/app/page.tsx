@@ -135,12 +135,16 @@ function VideoPlayer({
 // WEBRTC HOOK (for admin making test calls)
 // ============================================================
 
+const METERED_API_KEY = '0bccf96e655255d417d80e3d2b55949cdd32'
+const METERED_API_URL = 'https://sylvid.metered.live/api/v1/turn/credentials'
+
 function useWebRTC() {
   const socketRef = useRef<SignalSocket | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const localStreamRef = useRef<MediaStream | null>(null)
   const remoteStreamRef = useRef<MediaStream | null>(null)
   const remotePeerIdRef = useRef<string | null>(null)
+  const turnServersRef = useRef<RTCIceServer[]>([])
 
   const [peers, setPeers] = useState<Peer[]>([])
   const [myId, setMyId] = useState<string | null>(null)
@@ -260,15 +264,31 @@ function useWebRTC() {
     localStreamRef.current = stream; setLocalStream(stream); return stream
   }, [])
 
-  const createPeerConnection = useCallback((stream: MediaStream, remotePeerId: string) => {
+  // Fetch TURN credentials from Metered (short-lived, auto-regional)
+  const fetchTurnServers = useCallback(async (): Promise<RTCIceServer[]> => {
+    try {
+      const res = await fetch(`${METERED_API_URL}?apiKey=${METERED_API_KEY}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const servers = await res.json()
+      console.log('[Sylvid] TURN servers fetched:', servers?.length || 0)
+      turnServersRef.current = servers
+      return servers
+    } catch (e) {
+      console.warn('[Sylvid] Failed to fetch TURN servers, using STUN only:', e)
+      return []
+    }
+  }, [])
+
+  const createPeerConnection = useCallback(async (stream: MediaStream, remotePeerId: string) => {
     bufferedIceCandidates.current = []
+    // Fetch fresh TURN credentials for each call
+    const turnServers = await fetchTurnServers()
     const pc = new RTCPeerConnection({
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
-        { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun4.l.google.com:19302' },
+        ...turnServers,
       ]
     })
     pcRef.current = pc; remotePeerIdRef.current = remotePeerId
@@ -331,7 +351,7 @@ function useWebRTC() {
     try {
       console.log('[Sylvid] Calling:', targetId, targetName)
       const stream = await getLocalStream()
-      createPeerConnection(stream, targetId)
+      await createPeerConnection(stream, targetId)
       const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
       console.log('[Sylvid] Waiting for ICE candidates...')
@@ -359,14 +379,14 @@ function useWebRTC() {
       console.error('[Sylvid] callPeer error:', err)
       setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Call failed: ${err?.message || err}`)
     }
-  }, [getLocalStream, createPeerConnection, clearRingTimer, cleanupCall])
+  }, [getLocalStream, createPeerConnection, fetchTurnServers, clearRingTimer, cleanupCall])
 
   const acceptCall = useCallback(async () => {
     if (!incomingCall) return
     try {
       console.log('[Sylvid] Accepting call from', incomingCall.fromName)
       const stream = await getLocalStream()
-      createPeerConnection(stream, incomingCall.fromId)
+      await createPeerConnection(stream, incomingCall.fromId)
       const pc = pcRef.current; if (!pc) return
 
       // Add any buffered ICE candidates from the caller
@@ -392,7 +412,7 @@ function useWebRTC() {
       console.error('[Sylvid] acceptCall error:', err)
       setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Accept failed: ${err?.message || err}`)
     }
-  }, [incomingCall, getLocalStream, createPeerConnection, startConnectTimer])
+  }, [incomingCall, getLocalStream, createPeerConnection, fetchTurnServers, startConnectTimer])
 
   const rejectCall = useCallback(() => {
     if (incomingCall && socketRef.current) socketRef.current.emit('call-rejected', { targetId: incomingCall.fromId })
