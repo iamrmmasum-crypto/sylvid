@@ -37,6 +37,8 @@ import {
   Trash2,
   UserX,
   RefreshCw,
+  Camera,
+  XCircle,
 } from 'lucide-react'
 
 // ============================================================
@@ -61,6 +63,15 @@ interface ActiveCall {
   calleeId: string
   calleeName: string
   startedAt: number
+}
+
+interface CameraErrorInfo {
+  title: string
+  message: string
+  steps: string[]
+ isDeviceInUse: boolean
+  isPermissionDenied: boolean
+  isNotFound: boolean
 }
 
 interface AdminSnapshot {
@@ -158,6 +169,7 @@ function useWebRTC() {
   const [isCameraOff, setIsCameraOff] = useState(false)
   const [callStatus, setCallStatus] = useState<'idle' | 'ringing' | 'connecting' | 'connected' | 'ended'>('idle')
   const [callError, setCallError] = useState('')
+  const [cameraError, setCameraError] = useState<CameraErrorInfo | null>(null)
   const [ringTarget, setRingTarget] = useState<{ id: string; name: string } | null>(null)
   const [backend, setBackend] = useState('unknown')
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -260,9 +272,99 @@ function useWebRTC() {
     return () => { clearInterval(backendCheck); socket.disconnect() }
   }, [])
 
+  const isMobileDevice = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+
   const getLocalStream = useCallback(async () => {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' }, audio: true })
-    localStreamRef.current = stream; setLocalStream(stream); return stream
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' }, audio: true })
+      localStreamRef.current = stream; setLocalStream(stream); return stream
+    } catch (err: any) {
+      console.error('[Sylvid] getLocalStream error:', err?.name, err?.message)
+      const errName = err?.name || ''
+      const errMsg = err?.message || ''
+
+      // Device in use — another app has the camera open
+      if (errName === 'NotReadableError' || errMsg.includes('Device in use') || errMsg.includes('Could not start video source')) {
+        const mobileSteps = isMobileDevice
+          ? [
+              'Close all other apps that might be using the camera (WhatsApp, Instagram, etc.)',
+              'Go to your phone Settings → Apps → Browser → Permissions → Camera → Allow',
+              'Go to Settings → Apps → Browser → Permissions → Microphone → Allow',
+              'Close ALL browser tabs and reopen this page',
+              'If still stuck, restart your phone and try again',
+            ]
+          : [
+              'Close other apps that might be using the camera (Zoom, Teams, etc.)',
+              'Check your browser address bar — click the camera icon and select "Allow"',
+              'Close other browser tabs that might have camera access',
+              'Try a different browser (Chrome, Edge, or Firefox)',
+            ]
+        setCameraError({
+          title: 'Camera is busy',
+          message: 'Another app or tab is using your camera right now.',
+          steps: mobileSteps,
+          isDeviceInUse: true,
+          isPermissionDenied: false,
+          isNotFound: false,
+        })
+        throw new Error('Camera is in use by another app. Please close other apps and try again.')
+      }
+
+      // Permission denied — user blocked camera/mic
+      if (errName === 'NotAllowedError' || errName === 'PermissionDeniedError') {
+        const mobileSteps = isMobileDevice
+          ? [
+              'When prompted, tap "Allow" for camera and microphone',
+              'If you accidentally blocked it: go to phone Settings → Apps → Browser → Permissions',
+              'Set Camera to "Allow" and Microphone to "Allow"',
+              'Come back to this page and refresh',
+              'On iPhone: Settings → Safari → Camera → Allow',
+            ]
+          : [
+              'Click the camera/mic icon in the browser address bar',
+              'Select "Allow" for both camera and microphone',
+              'Refresh the page and try again',
+              'Check: chrome://settings/content/camera (Chrome) or edge://settings/content/camera (Edge)',
+            ]
+        setCameraError({
+          title: 'Camera/mic permission blocked',
+          message: 'You need to allow camera and microphone access in your browser.',
+          steps: mobileSteps,
+          isDeviceInUse: false,
+          isPermissionDenied: true,
+          isNotFound: false,
+        })
+        throw new Error('Camera/microphone permission denied. Please allow access in your browser settings.')
+      }
+
+      // No camera found
+      if (errName === 'NotFoundError' || errMsg.includes('Requested device not found')) {
+        setCameraError({
+          title: 'No camera found',
+          message: 'Your device does not have a camera or it is not connected.',
+          steps: isMobileDevice
+            ? ['Make sure your phone has a working camera', 'Try restarting your phone']
+            : ['Check if your webcam is plugged in', 'Try a different USB port', 'Check Device Manager to confirm camera is detected'],
+          isDeviceInUse: false,
+          isPermissionDenied: false,
+          isNotFound: true,
+        })
+        throw new Error('No camera found on this device.')
+      }
+
+      // Generic error
+      setCameraError({
+        title: 'Camera error',
+        message: `Could not access camera: ${errMsg}`,
+        steps: isMobileDevice
+          ? ['Close other apps using the camera', 'Grant camera permission in phone Settings', 'Restart the browser and try again']
+          : ['Check browser camera permissions', 'Close other apps using the camera', 'Try a different browser'],
+        isDeviceInUse: false,
+        isPermissionDenied: false,
+        isNotFound: false,
+      })
+      throw err
+    }
   }, [])
 
   // Fetch TURN credentials via server proxy (avoids CORS, keeps API key server-side)
@@ -376,7 +478,7 @@ function useWebRTC() {
       }
     } catch (err: any) {
       console.error('[Sylvid] callPeer error:', err)
-      setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Call failed: ${err?.message || err}`)
+      setCallError(err?.message || 'Call failed')
     }
   }, [getLocalStream, createPeerConnection, fetchTurnServers, clearRingTimer, cleanupCall])
 
@@ -405,7 +507,7 @@ function useWebRTC() {
       setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
     } catch (err: any) {
       console.error('[Sylvid] acceptCall error:', err)
-      setCallError(err?.name === 'NotAllowedError' ? 'Camera/mic permission denied' : `Accept failed: ${err?.message || err}`)
+      setCallError(err?.message || 'Accept failed')
     }
   }, [incomingCall, getLocalStream, createPeerConnection, fetchTurnServers, startConnectTimer])
 
@@ -422,7 +524,7 @@ function useWebRTC() {
   const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
   const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
 
-  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, backend, socketRef }
+  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, cameraError, setCameraError, ringTarget, backend, socketRef }
 }
 
 // ============================================================
@@ -880,7 +982,7 @@ export default function VideoCallPage() {
 
   // ===== ADMIN DASHBOARD =====
   // ===== CALL MODE (user) =====
-  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, ringTarget, backend } = webrtc
+  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, cameraError, setCameraError, ringTarget, backend } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
   const inCall = isInCall || callStatus === 'ringing' || callStatus === 'connecting' || callStatus === 'connected'
 
@@ -942,6 +1044,38 @@ export default function VideoCallPage() {
             </Button>
           </div>
         </div>
+
+        {/* Camera Error Dialog — shows step-by-step fix instructions */}
+        <Dialog open={!!cameraError} onOpenChange={(open) => { if (!open) setCameraError(null) }}>
+          <DialogContent className="bg-neutral-900 border-neutral-800 text-white sm:max-w-md max-h-[90vh] overflow-y-auto">
+            <DialogHeader className="text-center items-center">
+              <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">
+                {cameraError?.isDeviceInUse ? <Camera className="w-8 h-8 text-red-400" /> : <XCircle className="w-8 h-8 text-red-400" />}
+              </div>
+              <DialogTitle className="text-xl">{cameraError?.title}</DialogTitle>
+              <DialogDescription className="text-neutral-400 mt-1">{cameraError?.message}</DialogDescription>
+            </DialogHeader>
+            <div className="mt-4 space-y-3">
+              <p className="text-neutral-300 text-sm font-medium">How to fix:</p>
+              <ol className="space-y-2">
+                {cameraError?.steps.map((step, i) => (
+                  <li key={i} className="flex items-start gap-3 text-sm">
+                    <span className="flex-shrink-0 w-6 h-6 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-xs font-bold mt-0.5">{i + 1}</span>
+                    <span className="text-neutral-300">{step}</span>
+                  </li>
+                ))}
+              </ol>
+            </div>
+            <div className="mt-6 flex justify-center">
+              <Button
+                onClick={() => { setCameraError(null); setCallError('') }}
+                className="bg-violet-600 hover:bg-violet-700 text-white px-6"
+              >
+                Got it, I'll try again
+              </Button>
+            </div>
+          </DialogContent>
+        </Dialog>
 
         {/* Incoming call dialog — can arrive even while in another call */}
         <Dialog open={!!incomingCall}>
@@ -1080,7 +1214,7 @@ export default function VideoCallPage() {
           </div>
         </div>
 
-        {callError && (
+        {callError && !cameraError && (
           <Card className="bg-red-500/10 border-red-500/30">
             <CardContent className="p-3 flex items-center gap-2">
               <AlertTriangle className="w-4 h-4 text-red-400 shrink-0" />
@@ -1089,6 +1223,38 @@ export default function VideoCallPage() {
           </Card>
         )}
       </div>
+
+      {/* Camera Error Dialog — shows step-by-step fix instructions */}
+      <Dialog open={!!cameraError} onOpenChange={(open) => { if (!open) setCameraError(null) }}>
+        <DialogContent className="bg-neutral-900 border-neutral-800 text-white sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogHeader className="text-center items-center">
+            <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">
+              {cameraError?.isDeviceInUse ? <Camera className="w-8 h-8 text-red-400" /> : <XCircle className="w-8 h-8 text-red-400" />}
+            </div>
+            <DialogTitle className="text-xl">{cameraError?.title}</DialogTitle>
+            <DialogDescription className="text-neutral-400 mt-1">{cameraError?.message}</DialogDescription>
+          </DialogHeader>
+          <div className="mt-4 space-y-3">
+            <p className="text-neutral-300 text-sm font-medium">How to fix:</p>
+            <ol className="space-y-2">
+              {cameraError?.steps.map((step, i) => (
+                <li key={i} className="flex items-start gap-3 text-sm">
+                  <span className="flex-shrink-0 w-6 h-6 rounded-full bg-violet-500/20 text-violet-300 flex items-center justify-center text-xs font-bold mt-0.5">{i + 1}</span>
+                  <span className="text-neutral-300">{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <div className="mt-6 flex justify-center">
+            <Button
+              onClick={() => { setCameraError(null); setCallError('') }}
+              className="bg-violet-600 hover:bg-violet-700 text-white px-6"
+            >
+              Got it, I'll try again
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={!!incomingCall}>
         <DialogContent className="bg-neutral-900 border-neutral-800 text-white sm:max-w-md">
