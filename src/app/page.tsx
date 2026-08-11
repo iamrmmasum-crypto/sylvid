@@ -247,6 +247,13 @@ function useWebRTC() {
 
   const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
 
+  const waitForIce = (pc: RTCPeerConnection): Promise<void> => new Promise((resolve) => {
+    if (pc.iceGatheringState === 'complete') return resolve()
+    const timeout = setTimeout(() => { pc.removeEventListener('icegatheringstatechange', check); resolve() }, 5000)
+    const check = () => { if (pc.iceGatheringState === 'complete') { clearTimeout(timeout); pc.removeEventListener('icegatheringstatechange', check); resolve() } }
+    pc.addEventListener('icegatheringstatechange', check)
+  })
+
   const callPeer = useCallback(async (targetId: string, targetName?: string) => {
     setCallError('')
     try {
@@ -255,7 +262,9 @@ function useWebRTC() {
       createPeerConnection(stream, targetId)
       const pc = pcRef.current; if (!pc) { setCallError('Failed to create peer connection'); return }
       const offer = await pc.createOffer(); await pc.setLocalDescription(offer)
-      console.log('[Sylvid] Sending call-offer to', targetId)
+      console.log('[Sylvid] Waiting for ICE candidates...')
+      await waitForIce(pc)
+      console.log('[Sylvid] ICE gathering complete, sending offer to', targetId)
       if (socketRef.current) {
         socketRef.current.emit('call-offer', { targetId, offer: { type: offer.type, sdp: offer.sdp } })
         setRingTarget({ id: targetId, name: targetName || 'User' })
@@ -285,6 +294,9 @@ function useWebRTC() {
     const pc = pcRef.current; if (!pc) return
     await pc.setRemoteDescription(new RTCSessionDescription(incomingCall.offer))
     const answer = await pc.createAnswer(); await pc.setLocalDescription(answer)
+    console.log('[Sylvid] Waiting for ICE candidates before answering...')
+    await waitForIce(pc)
+    console.log('[Sylvid] ICE complete, sending answer')
     socketRef.current?.emit('call-answer', { targetId: incomingCall.fromId, answer: { type: answer.type, sdp: answer.sdp } })
     setIncomingCall(null); setCallStatus('connecting')
   }, [incomingCall, getLocalStream, createPeerConnection])
