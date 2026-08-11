@@ -135,8 +135,8 @@ function VideoPlayer({
 // WEBRTC HOOK (for admin making test calls)
 // ============================================================
 
-const METERED_API_KEY = '0bccf96e655255d417d80e3d2b55949cdd32'
-const METERED_API_URL = 'https://sylvid.metered.live/api/v1/turn/credentials'
+const METERED_API_KEY = '' // unused — proxy at /api/turn handles auth
+const TURN_PROXY_URL = '/api/turn'
 
 function useWebRTC() {
   const socketRef = useRef<SignalSocket | null>(null)
@@ -264,10 +264,10 @@ function useWebRTC() {
     localStreamRef.current = stream; setLocalStream(stream); return stream
   }, [])
 
-  // Fetch TURN credentials from Metered (short-lived, auto-regional)
+  // Fetch TURN credentials via server proxy (avoids CORS, keeps API key server-side)
   const fetchTurnServers = useCallback(async (): Promise<RTCIceServer[]> => {
     try {
-      const res = await fetch(`${METERED_API_URL}?apiKey=${METERED_API_KEY}`)
+      const res = await fetch(TURN_PROXY_URL)
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const servers = await res.json()
       console.log('[Sylvid] TURN servers fetched:', servers?.length || 0)
