@@ -480,7 +480,8 @@ function useWebRTC() {
       localStreamRef.current = localStream; setLocalStream(localStream)
     } catch (camErr: any) {
       console.warn('[Sylvid] Camera failed on call — continuing without local video:', camErr?.message)
-      // Don't throw — continue to establish connection so we can at least SEE the other person
+      setCameraError(null)
+      // Don't show warning for caller — the ringing screen is shown instead
     }
     try {
       await createPeerConnection(targetId, localStream, targetName)
@@ -522,6 +523,9 @@ function useWebRTC() {
       localStreamRef.current = localStream; setLocalStream(localStream)
     } catch (camErr: any) {
       console.warn('[Sylvid] Camera failed on accept — continuing without local video:', camErr?.message)
+      // Clear the blocking dialog — show non-blocking warning instead
+      setCameraError(null)
+      setCallError('Camera not available — you can see the other person but they can\'t see you')
       // Don't throw — we MUST send the answer so the caller doesn't time out
     }
     try {
@@ -1066,6 +1070,7 @@ export default function VideoCallPage() {
                 <div className="flex flex-col items-center gap-3">
                   <div className="w-12 h-12 border-3 border-emerald-400 border-t-transparent rounded-full animate-spin" />
                   <p className="text-white font-medium">Connecting...</p>
+                  {callError && <p className="text-amber-400 text-xs text-center max-w-[250px]">{callError}</p>}
                 </div>
               </div>
             )}
