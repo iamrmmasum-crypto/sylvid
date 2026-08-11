@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { signIn } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Video, Mail, Lock, User, ArrowRight, Eye, EyeOff } from 'lucide-react'
@@ -27,15 +26,14 @@ export default function SignupPage() {
 
     setLoading(true)
     try {
-      const res = await signIn('credentials', {
-        email,
-        password,
-        nickname,
-        isSignup: 'true',
-        redirect: false,
+      const res = await fetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password, nickname }),
       })
-      if (res?.error) {
-        setError(res.error === 'CredentialsSignin' ? 'Email already registered' : res.error)
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'Signup failed')
       } else {
         router.push('/')
       }

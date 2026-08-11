@@ -1,7 +1,7 @@
 'use client'
 
 import { useRef, useState, useEffect, useCallback } from 'react'
-import { useSession, signOut } from 'next-auth/react'
+import { useAuth } from '@/lib/auth-context'
 import { createSignalSocket, type SignalSocket } from '@/hooks/useSignaling'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -886,7 +886,7 @@ function StatCard({ icon, label, value, color }: { icon: React.ReactNode; label:
 type AppMode = 'admin' | 'call'
 
 export default function VideoCallPage() {
-  const { data: session, status } = useSession()
+  const { user, status, logout } = useAuth()
   const [mode, setMode] = useState<AppMode>('call')
   const [passInput, setPassInput] = useState('')
   const [loginError, setLoginError] = useState('')
@@ -896,10 +896,10 @@ export default function VideoCallPage() {
 
   // Auto-register with session nickname once authenticated
   useEffect(() => {
-    if (status === 'authenticated' && session?.user?.nickname && !webrtc.isRegistered) {
-      webrtc.register(session.user.nickname)
+    if (status === 'authenticated' && user?.nickname && !webrtc.isRegistered) {
+      webrtc.register(user.nickname)
     }
-  }, [status, session?.user?.nickname, webrtc.isRegistered])
+  }, [status, user?.nickname, webrtc.isRegistered])
 
   const handleAdminLogin = () => {
     if (passInput === 'admin2024') {
@@ -912,7 +912,7 @@ export default function VideoCallPage() {
 
   const handleLogout = () => {
     webrtc.socketRef.current?.disconnect()
-    signOut({ callbackUrl: '/login' })
+    logout()
   }
 
   // Loading state while session loads
@@ -1132,7 +1132,7 @@ export default function VideoCallPage() {
                 </div>
                 <div>
                   <p className="text-white font-medium">{myUsername}</p>
-                  <p className="text-neutral-500 text-xs">{session?.user?.email}</p>
+                  <p className="text-neutral-500 text-xs">{user?.email}</p>
                   <p className="text-neutral-600 text-xs font-mono">ID: {myId?.slice(0, 8)}...</p>
                 </div>
               </div>

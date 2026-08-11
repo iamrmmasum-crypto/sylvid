@@ -1,9 +1,9 @@
-import { auth } from '@/lib/auth'
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
+import { verifyToken, COOKIE_NAME } from '@/lib/auth'
 
-export default auth((req) => {
+export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
-  const isLoggedIn = !!req.auth
+  const token = req.cookies.get(COOKIE_NAME)?.value
 
   // Public routes (no auth required)
   const publicRoutes = ['/login', '/signup', '/api/auth']
@@ -12,19 +12,26 @@ export default auth((req) => {
 
   if (isStaticAsset || isPublicRoute) return NextResponse.next()
 
+  // Verify JWT
+  let isAuthenticated = false
+  if (token) {
+    const user = await verifyToken(token)
+    if (user) isAuthenticated = true
+  }
+
   // Protected routes — redirect to login if not authenticated
-  if (!isLoggedIn && pathname === '/') {
+  if (!isAuthenticated && pathname === '/') {
     const loginUrl = new URL('/login', req.url)
     return NextResponse.redirect(loginUrl)
   }
 
   // If logged in and trying to access auth pages, redirect to home
-  if (isLoggedIn && (pathname === '/login' || pathname === '/signup')) {
+  if (isAuthenticated && (pathname === '/login' || pathname === '/signup')) {
     return NextResponse.redirect(new URL('/', req.url))
   }
 
   return NextResponse.next()
-})
+}
 
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon.ico|icons/).*)'],

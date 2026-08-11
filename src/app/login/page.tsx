@@ -1,7 +1,6 @@
 'use client'
 
 import { useState } from 'react'
-import { signIn } from 'next-auth/react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Video, Mail, Lock, ArrowRight, Eye, EyeOff } from 'lucide-react'
@@ -24,13 +23,14 @@ export default function LoginPage() {
 
     setLoading(true)
     try {
-      const res = await signIn('credentials', {
-        email,
-        password,
-        redirect: false,
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
       })
-      if (res?.error) {
-        setError(res.error === 'CredentialsSignin' ? 'Invalid email or password' : res.error)
+      const data = await res.json()
+      if (!res.ok) {
+        setError(data.error || 'Invalid email or password')
       } else {
         router.push('/')
       }
