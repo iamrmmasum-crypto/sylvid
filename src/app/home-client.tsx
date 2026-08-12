@@ -386,7 +386,6 @@ function useWebRTC() {
   }, [])
 
   const createPeerConnection = useCallback(async (remotePeerId: string, localStream?: MediaStream, remotePeerName?: string) => {
-    bufferedIceCandidates.current = []
     // Fetch fresh TURN credentials for each call
     const turnServers = await fetchTurnServers()
     const pc = new RTCPeerConnection({
@@ -474,6 +473,7 @@ function useWebRTC() {
 
   const callPeer = useCallback(async (targetId: string, targetName?: string) => {
     setCallError(''); setCameraError(null)
+    bufferedIceCandidates.current = []
     console.log('[Sylvid] Calling:', targetId, targetName)
     let localStream: MediaStream | undefined
     try {
