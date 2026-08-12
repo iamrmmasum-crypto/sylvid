@@ -5,11 +5,7 @@ const config: CapacitorConfig = {
   appName: 'Sylvid',
   webDir: 'out',
   server: {
-    // ============================================
-    // IMPORTANT: Replace with your actual Railway URL
-    // e.g. 'https://sylvid-production.up.railway.app'
-    // ============================================
-    url: 'https://sylvid-production.up.railway.app',
+    url: 'https://sylvid-production.up.railway.app/',
     cleartext: true,
   },
   plugins: {
