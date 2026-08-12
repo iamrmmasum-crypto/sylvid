@@ -1,38 +1,59 @@
 package com.sylvid.app;
 
+import android.Manifest;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebChromeClient;
 import android.webkit.WebView;
 import android.webkit.PermissionRequest;
-import android.widget.Toast;
+
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
+    private static final int PERMISSION_REQUEST_CODE = 1001;
+
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
 
-        // Configure WebView for WebRTC support
-        getWindow().getDecorView().post(() -> {
-            WebView webView = getBridge().getWebView();
-            if (webView != null) {
-                // Enable WebRTC-specific settings
-                webView.getSettings().setMediaPlaybackRequiresUserGesture(false);
-                webView.getSettings().setDomStorageEnabled(true);
-                webView.getSettings().setJavaScriptEnabled(true);
-                webView.getSettings().setAllowFileAccess(true);
+        // Request camera and mic permissions upfront
+        requestWebRTCPermissions();
+    }
 
-                // Handle WebRTC permission requests (camera, mic)
-                webView.setWebChromeClient(new WebChromeClient() {
-                    @Override
-                    public void onPermissionRequest(final PermissionRequest request) {
-                        // Auto-grant WebRTC permissions for camera and mic
-                        // The Android permissions are already declared in manifest
-                        runOnUiThread(() -> request.grant(request.getResources()));
-                    }
-                });
+    private void requestWebRTCPermissions() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            String[] permissions = {
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.MODIFY_AUDIO_SETTINGS
+            };
+
+            boolean needsRequest = false;
+            for (String perm : permissions) {
+                if (ContextCompat.checkSelfPermission(this, perm) != PackageManager.PERMISSION_GRANTED) {
+                    needsRequest = true;
+                    break;
+                }
             }
-        });
+
+            if (needsRequest) {
+                ActivityCompat.requestPermissions(this, permissions, PERMISSION_REQUEST_CODE);
+            }
+        }
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == PERMISSION_REQUEST_CODE) {
+            // Permissions granted/denied — reload to let WebRTC retry
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                getBridge().getWebView().reload();
+            }
+        }
     }
 }
