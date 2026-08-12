@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Sylvid</string>
+    <string name="title_activity_main">Sylvid</string>
+    <string name="package_name">com.sylvid.app</string>
+    <string name="custom_url_scheme">com.sylvid.app</string>
+</resources>

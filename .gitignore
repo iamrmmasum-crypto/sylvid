@@ -50,6 +50,10 @@ test
 prompt
 
 server.log
+# Android build artifacts (generated locally, not needed in git)
+/android/app/build/
+/android/.gradle/
+/android/build/
 # Skills directory
 /skills/
 /tool-results/
