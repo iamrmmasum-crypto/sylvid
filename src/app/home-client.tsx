@@ -279,7 +279,18 @@ function useWebRTC() {
 
   const getLocalStream = useCallback(async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: 'user' }, audio: true })
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 640, max: 1280 },
+          height: { ideal: 480, max: 720 },
+          frameRate: { ideal: 15, max: 30 },
+          facingMode: 'user'
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true
+        }
+      })
       localStreamRef.current = stream; setLocalStream(stream); return stream
     } catch (err: any) {
       console.error('[Sylvid] getLocalStream error:', err?.name, err?.message)
