@@ -176,7 +176,10 @@ function useWebRTC() {
   const [backend, setBackend] = useState('unknown')
   const ringTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const connectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const calleeRingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const disconnectGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const bufferedIceCandidates = useRef<RTCIceCandidateInit[]>([])
+  const iceRestartAttemptedRef = useRef(false)
 
   const myIdRef = useRef<string | null>(null)
 
@@ -188,10 +191,21 @@ function useWebRTC() {
     if (connectTimerRef.current) { clearTimeout(connectTimerRef.current); connectTimerRef.current = null }
   }, [])
 
+  const clearCalleeRingTimer = useCallback(() => {
+    if (calleeRingTimerRef.current) { clearTimeout(calleeRingTimerRef.current); calleeRingTimerRef.current = null }
+  }, [])
+
+  const clearDisconnectGraceTimer = useCallback(() => {
+    if (disconnectGraceTimerRef.current) { clearTimeout(disconnectGraceTimerRef.current); disconnectGraceTimerRef.current = null }
+  }, [])
+
   const cleanupCall = useCallback(() => {
     clearRingTimer()
     clearConnectTimer()
+    clearCalleeRingTimer()
+    clearDisconnectGraceTimer()
     bufferedIceCandidates.current = []
+    iceRestartAttemptedRef.current = false
     if (pcRef.current) { pcRef.current.close(); pcRef.current = null }
     if (localStreamRef.current) { localStreamRef.current.getTracks().forEach((t) => t.stop()); localStreamRef.current = null }
     remoteStreamRef.current = null
@@ -200,7 +214,7 @@ function useWebRTC() {
     setRemoteStream(null); setLocalStream(null); setIsInCall(false)
     setIsMuted(false); setIsCameraOff(false); setIncomingCall(null)
     setRingTarget(null); setCallError('')
-  }, [clearRingTimer, clearConnectTimer])
+  }, [clearRingTimer, clearConnectTimer, clearCalleeRingTimer, clearDisconnectGraceTimer])
 
   const startConnectTimer = useCallback(() => {
     clearConnectTimer()
@@ -239,6 +253,15 @@ function useWebRTC() {
     socket.on('incoming-call', (data) => {
       setIncomingCall(data)
       // Don't change callStatus — callee stays in lobby so the accept/reject Dialog is visible
+      // Auto-reject if callee doesn't respond within 35 seconds
+      clearCalleeRingTimer()
+      calleeRingTimerRef.current = setTimeout(() => {
+        console.log('[Sylvid] Callee ring timeout (35s) — auto-rejecting incoming call')
+        if (socketRef.current && data?.fromId) {
+          socketRef.current.emit('call-rejected', { targetId: data.fromId })
+        }
+        setIncomingCall(null)
+      }, 35000)
     })
 
     socket.on('call-answered', async (data) => {
@@ -286,13 +309,19 @@ function useWebRTC() {
       const videoConstraints = isWebView
         ? { width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 }, frameRate: { ideal: 15, max: 15 }, facingMode: 'user' as const }
         : { width: { ideal: 640, max: 1280 }, height: { ideal: 480, max: 720 }, frameRate: { ideal: 15, max: 30 }, facingMode: 'user' as const }
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: videoConstraints,
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true
-        }
-      })
+      // Wrap getUserMedia with a 15s timeout so it doesn't hang forever on Android WebView
+      const stream = await Promise.race([
+        navigator.mediaDevices.getUserMedia({
+          video: videoConstraints,
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true
+          }
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Camera access timed out after 15 seconds. Please check permissions and try again.')), 15000)
+        ),
+      ])
       localStreamRef.current = stream; setLocalStream(stream); return stream
     } catch (err: any) {
       console.error('[Sylvid] getLocalStream error:', err?.name, err?.message)
@@ -458,46 +487,72 @@ function useWebRTC() {
       console.log('[Sylvid] ICE connection state:', pc.iceConnectionState)
       // Android WebView sometimes doesn't fire connectionstatechange — use ICE state as fallback
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        clearDisconnectGraceTimer()
         clearConnectTimer(); setCallStatus('connected'); setIsInCall(true)
       }
       else if (pc.iceConnectionState === 'failed') {
-        console.error('[Sylvid] WebRTC connection FAILED — likely NAT/firewall issue')
+        console.error('[Sylvid] WebRTC ICE FAILED — attempting ICE restart before giving up')
+        if (!iceRestartAttemptedRef.current && pcRef.current) {
+          iceRestartAttemptedRef.current = true
+          try {
+            pc.restartIce()
+            console.log('[Sylvid] ICE restart triggered — waiting for reconnection...')
+            // If ICE restart doesn't recover within 10s, give up
+            disconnectGraceTimerRef.current = setTimeout(() => {
+              console.error('[Sylvid] ICE restart did not recover after 10s — ending call')
+              setCallError('Connection failed. Both users should be on WiFi for best results.')
+              cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
+            }, 10000)
+            return
+          } catch (e) {
+            console.warn('[Sylvid] ICE restart failed:', e)
+          }
+        }
         setCallError('Connection failed. Both users should be on WiFi for best results.')
         cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
       }
       else if (pc.iceConnectionState === 'disconnected') {
-        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000)
+        // Don't kill immediately — WebRTC 'disconnected' is often transient.
+        // Wait 8 seconds to allow auto-recovery before tearing down.
+        console.warn('[Sylvid] ICE disconnected — waiting 8s for auto-recovery...')
+        if (!disconnectGraceTimerRef.current) {
+          disconnectGraceTimerRef.current = setTimeout(() => {
+            // Re-check state — if it recovered, do nothing
+            if (pcRef.current && (pcRef.current.iceConnectionState === 'disconnected' || pcRef.current.iceConnectionState === 'failed')) {
+              console.error('[Sylvid] ICE still disconnected after 8s grace — ending call')
+              cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000)
+            }
+          }, 8000)
+        }
       }
     }
     pc.onconnectionstatechange = () => {
       console.log('[Sylvid] Connection state:', pc.connectionState)
-      if (pc.connectionState === 'connected') { clearConnectTimer(); setCallStatus('connected'); setIsInCall(true) }
-      else if (pc.connectionState === 'failed') {
-        console.error('[Sylvid] WebRTC connection FAILED — likely NAT/firewall issue')
-        setCallError('Connection failed. Both users should be on WiFi for best results.')
-        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
+      if (pc.connectionState === 'connected') {
+        clearDisconnectGraceTimer()
+        clearConnectTimer(); setCallStatus('connected'); setIsInCall(true)
       }
-      else if (['disconnected', 'closed'].includes(pc.connectionState)) { cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000) }
+      else if (pc.connectionState === 'failed') {
+        // Already handled by oniceconnectionstatechange (which has ICE restart logic)
+        // Only act if ICE handler didn't already handle it
+        if (pc.iceConnectionState !== 'failed') {
+          console.error('[Sylvid] Connection FAILED (non-ICE)')
+          setCallError('Connection failed. Both users should be on WiFi for best results.')
+          cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
+        }
+      }
+      else if (pc.connectionState === 'disconnected') {
+        // ICE handler manages the grace period — don't duplicate teardown here
+        console.warn('[Sylvid] Connection state disconnected (ICE handler manages recovery)')
+      }
+      else if (pc.connectionState === 'closed') {
+        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000)
+      }
     }
     return pc
   }, [cleanupCall, clearConnectTimer, getLocalStream])
 
   const register = useCallback((username: string) => { socketRef.current?.emit('register', { username, device: 'web-admin' }) }, [])
-
-  const waitForIce = (pc: RTCPeerConnection, label = 'ICE'): Promise<void> => new Promise((resolve) => {
-    if (pc.iceGatheringState === 'complete') { console.log(`[Sylvid] ${label} already complete`); return resolve() }
-    const timeout = setTimeout(() => {
-      console.warn(`[Sylvid] ${label} gathering timed out after 10s (state: ${pc.iceGatheringState})`)
-      pc.removeEventListener('icegatheringstatechange', check); resolve()
-    }, 10000)
-    const check = () => {
-      if (pc.iceGatheringState === 'complete') {
-        console.log(`[Sylvid] ${label} gathering completed`)
-        clearTimeout(timeout); pc.removeEventListener('icegatheringstatechange', check); resolve()
-      }
-    }
-    pc.addEventListener('icegatheringstatechange', check)
-  })
 
   const callPeer = useCallback(async (targetId: string, targetName?: string) => {
     setCallError(''); setCameraError(null)
@@ -575,17 +630,20 @@ function useWebRTC() {
       const desc = pc.localDescription!
       console.log('[Sylvid] Sending answer (trickle ICE), SDP:', desc.sdp?.length, 'chars', localStream ? '' : '[NO LOCAL VIDEO]')
       socketRef.current?.emit('call-answer', { targetId: callInfo.fromId, answer: { type: desc.type, sdp: desc.sdp } })
+      clearCalleeRingTimer()
       setIncomingCall(null); setCallStatus('connecting'); startConnectTimer()
     } catch (err: any) {
+      clearCalleeRingTimer()
       console.error('[Sylvid] acceptCall error:', err)
       setCallError(err?.message || 'Accept failed')
     }
-  }, [incomingCall, createPeerConnection, startConnectTimer])
+  }, [incomingCall, createPeerConnection, startConnectTimer, clearCalleeRingTimer])
 
   const rejectCall = useCallback(() => {
+    clearCalleeRingTimer()
     if (incomingCall && socketRef.current) socketRef.current.emit('call-rejected', { targetId: incomingCall.fromId })
     setIncomingCall(null); setCallStatus('idle')
-  }, [incomingCall])
+  }, [incomingCall, clearCalleeRingTimer])
 
   const endCall = useCallback(() => {
     if (socketRef.current && remotePeerIdRef.current) socketRef.current.emit('call-ended', { targetId: remotePeerIdRef.current })
@@ -595,7 +653,7 @@ function useWebRTC() {
   const toggleMute = useCallback(() => { localStreamRef.current?.getAudioTracks().forEach((t) => { t.enabled = !t.enabled }); setIsMuted((p) => !p) }, [])
   const toggleCamera = useCallback(() => { localStreamRef.current?.getVideoTracks().forEach((t) => { t.enabled = !t.enabled }); setIsCameraOff((p) => !p) }, [])
 
-  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, cameraError, setCameraError, ringTarget, backend, socketRef }
+  return { peers, myId, myUsername, isRegistered, register, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, setCallError, cameraError, setCameraError, ringTarget, backend, socketRef }
 }
 
 // ============================================================
@@ -997,7 +1055,7 @@ export default function HomeClient({ serverUser }: HomeClientProps) {
 
   // ===== ADMIN DASHBOARD =====
   // ===== CALL MODE (user) =====
-  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, cameraError, setCameraError, ringTarget, backend } = webrtc
+  const { peers, myId, myUsername, isRegistered, callPeer, incomingCall, acceptCall, rejectCall, isInCall, remoteStream, localStream, endCall, isMuted, isCameraOff, toggleMute, toggleCamera, callStatus, callError, setCallError, cameraError, setCameraError, ringTarget, backend } = webrtc
   const isMobile = /Android|iPhone|iPad|iPod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '')
   const inCall = isInCall || callStatus === 'ringing' || callStatus === 'connecting' || callStatus === 'connected'
 

@@ -20,10 +20,18 @@ function createSignalSocket(): SignalSocket {
   const userId = crypto.randomUUID()
   const handlers = new Map<string, EventHandler[]>()
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let lastTs = 0
   let alive = true
   let started = false
   let backend = 'unknown'
+
+  // Reconnection backoff state
+  let consecutiveFailures = 0
+  let currentPollInterval = 800
+  const BASE_POLL_INTERVAL = 800
+  const MAX_POLL_INTERVAL = 8000
+  const MAX_CONSECUTIVE_FAILURES = 5
 
   function fire(event: string, data?: any) {
     const list = handlers.get(event) || []
@@ -38,6 +46,7 @@ function createSignalSocket(): SignalSocket {
       const res = await fetch(`/api/signal?u=${userId}&s=${lastTs}`)
       if (!res.ok) {
         console.warn(`[Sylvid] Poll error: ${res.status}`)
+        handlePollFailure()
         return
       }
       const data = await res.json()
@@ -49,6 +58,9 @@ function createSignalSocket(): SignalSocket {
       }
       // Track backend type from server response
       if (data.backend) backend = data.backend
+
+      // Successful poll — reset failure counter and adjust interval back down
+      handlePollSuccess()
 
       // Fire peer-list from the poll response (freshest data from the server at GET time)
       // This always takes priority over any queued peer-list events
@@ -67,6 +79,38 @@ function createSignalSocket(): SignalSocket {
       }
     } catch (e) {
       console.warn('[Sylvid] Poll network error:', e)
+      handlePollFailure()
+    }
+  }
+
+  /** On poll success: reset failure counter, gradually reduce interval back to base */
+  function handlePollSuccess() {
+    if (consecutiveFailures > 0) {
+      consecutiveFailures = 0
+      // Gradually reduce interval back to base (don't jump immediately)
+      currentPollInterval = Math.max(BASE_POLL_INTERVAL, currentPollInterval * 0.5)
+      restartPollTimer()
+    }
+  }
+
+  /** On poll failure: increase interval with exponential backoff */
+  function handlePollFailure() {
+    consecutiveFailures++
+    if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+      console.warn(`[Sylvid] ${MAX_CONSECUTIVE_FAILURES} consecutive poll failures — firing reconnect event`)
+      fire('reconnecting', { attempts: consecutiveFailures })
+    }
+    // Exponential backoff: 800ms → 1.6s → 3.2s → 6.4s → 8s (capped)
+    currentPollInterval = Math.min(MAX_POLL_INTERVAL, currentPollInterval * 2)
+    console.log(`[Sylvid] Poll failure #${consecutiveFailures} — backing off to ${currentPollInterval}ms`)
+    restartPollTimer()
+  }
+
+  /** Stop and restart the poll timer with current interval */
+  function restartPollTimer() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    if (alive && started) {
+      pollTimer = setInterval(poll, currentPollInterval)
     }
   }
 
@@ -96,7 +140,7 @@ function createSignalSocket(): SignalSocket {
     started = true
     fire('connect')
     poll()
-    pollTimer = setInterval(poll, 800)
+    pollTimer = setInterval(poll, currentPollInterval)
   }
 
   // Auto-start immediately
@@ -114,6 +158,7 @@ function createSignalSocket(): SignalSocket {
     disconnect() {
       alive = false
       if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+      if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
       fire('disconnect')
     },
     get connected() { return alive },
