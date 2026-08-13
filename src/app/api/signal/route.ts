@@ -437,10 +437,14 @@ export async function POST(req: NextRequest) {
         await pushEvent(targetId, 'incoming-call', {
           fromId: userId, fromName: caller?.username || 'Unknown', offer: data.offer,
         })
+        // Diagnostic: verify the event was actually queued
+        const qLen = useKV ? '(kv)' : (mem.events.get(targetId)?.length || 0)
+        console.log(`[Sylvid] incoming-call pushed to ${targetId.slice(0,8)} queue length: ${qLen}`)
         break
       }
 
       case 'call-answer': {
+        console.log(`[Sylvid] call-answer from ${userId.slice(0,8)} → target ${data.targetId?.slice(0,8)}`)
         let targetId = data.targetId
         let caller = await getPeer(userId)
         let callee = await getPeer(targetId)
@@ -465,6 +469,7 @@ export async function POST(req: NextRequest) {
       }
 
       case 'ice-candidate': {
+        console.log(`[Sylvid] ice-candidate from ${userId.slice(0,8)} → ${data.targetId?.slice(0,8)}`)
         let iceTargetId = data.targetId
         let iceTarget = await getPeer(iceTargetId)
         // Resolve stale ID by username if needed
@@ -556,7 +561,15 @@ export async function GET(req: NextRequest) {
   try {
     await touchPeer(userId)
     await cleanStalePeers()
+    // Diagnostic: log queue length before read
+    const qBefore = useKV ? '(kv)' : (mem.events.get(userId)?.length || 0)
     const newEvents = await getEvents(userId, since)
+    const qAfter = useKV ? '(kv)' : (mem.events.get(userId)?.length || 0)
+    // Log when events are delivered (especially signaling events)
+    const sigEvents = newEvents.filter(e => ['incoming-call', 'call-answered', 'ice-candidate', 'call-rejected', 'call-ended'].includes(e.type))
+    if (sigEvents.length > 0) {
+      console.log(`[Sylvid] GET ${userId.slice(0,8)} since=${since}: delivered ${sigEvents.map(e=>e.type).join(',')} (queue: ${qBefore}→${qAfter})`)
+    }
     // Always include the current peer list so the client stays in sync
     // even if peer-list events are missed (serverless, network hiccups)
     const allPeers = await getAllPeers()
