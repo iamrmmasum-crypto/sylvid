@@ -440,6 +440,8 @@ function useWebRTC() {
       // Android WebView compatibility:
       bundlePolicy: 'max-bundle',
       rtcpMuxPolicy: 'require',
+      // Pre-allocate candidate pool for faster connection
+      iceCandidatePoolSize: 10,
     })
     pcRef.current = pc; remotePeerIdRef.current = remotePeerId; remotePeerNameRef.current = remotePeerName || null
     // Add local tracks if we have a stream (may be undefined if camera failed)
