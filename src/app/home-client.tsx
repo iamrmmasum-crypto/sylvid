@@ -204,11 +204,13 @@ function useWebRTC() {
 
   const startConnectTimer = useCallback(() => {
     clearConnectTimer()
+    // Android WebView is slower — give it 30s instead of 15s
+    const timeout = isWebView ? 30000 : 15000
     connectTimerRef.current = setTimeout(() => {
-      console.error('[Sylvid] Connection timeout — WebRTC failed to establish after 15s')
+      console.error(`[Sylvid] Connection timeout — WebRTC failed to establish after ${timeout/1000}s`)
       setCallError('Connection failed — could not reach the other user. Try again.')
       cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 3000)
-    }, 15000)
+    }, timeout)
   }, [clearConnectTimer, cleanupCall])
 
   useEffect(() => {
@@ -276,16 +278,16 @@ function useWebRTC() {
   }, [])
 
   const isMobileDevice = typeof navigator !== 'undefined' && /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent)
+  const isWebView = typeof navigator !== 'undefined' && /wv|WebView/i.test(navigator.userAgent)
 
   const getLocalStream = useCallback(async () => {
     try {
+      // Use lower constraints for Android WebView — it struggles with high-res
+      const videoConstraints = isWebView
+        ? { width: { ideal: 320, max: 640 }, height: { ideal: 240, max: 480 }, frameRate: { ideal: 15, max: 15 }, facingMode: 'user' as const }
+        : { width: { ideal: 640, max: 1280 }, height: { ideal: 480, max: 720 }, frameRate: { ideal: 15, max: 30 }, facingMode: 'user' as const }
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: {
-          width: { ideal: 640, max: 1280 },
-          height: { ideal: 480, max: 720 },
-          frameRate: { ideal: 15, max: 30 },
-          facingMode: 'user'
-        },
+        video: videoConstraints,
         audio: {
           echoCancellation: true,
           noiseSuppression: true
@@ -405,7 +407,10 @@ function useWebRTC() {
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
         ...turnServers,
-      ]
+      ],
+      // Android WebView compatibility:
+      bundlePolicy: 'max-bundle',
+      rtcpMuxPolicy: 'require',
     })
     pcRef.current = pc; remotePeerIdRef.current = remotePeerId; remotePeerNameRef.current = remotePeerName || null
     // Add local tracks if we have a stream (may be undefined if camera failed)
@@ -451,6 +456,18 @@ function useWebRTC() {
     }
     pc.oniceconnectionstatechange = () => {
       console.log('[Sylvid] ICE connection state:', pc.iceConnectionState)
+      // Android WebView sometimes doesn't fire connectionstatechange — use ICE state as fallback
+      if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
+        clearConnectTimer(); setCallStatus('connected'); setIsInCall(true)
+      }
+      else if (pc.iceConnectionState === 'failed') {
+        console.error('[Sylvid] WebRTC connection FAILED — likely NAT/firewall issue')
+        setCallError('Connection failed. Both users should be on WiFi for best results.')
+        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 4000)
+      }
+      else if (pc.iceConnectionState === 'disconnected') {
+        cleanupCall(); setCallStatus('ended'); setTimeout(() => setCallStatus('idle'), 2000)
+      }
     }
     pc.onconnectionstatechange = () => {
       console.log('[Sylvid] Connection state:', pc.connectionState)
