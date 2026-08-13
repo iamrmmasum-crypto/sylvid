@@ -474,6 +474,8 @@ function useWebRTC() {
       if (e.candidate) {
         candidateCount++
         console.log(`[Sylvid] ICE candidate #${candidateCount}: ${e.candidate.type}`, e.candidate.candidate?.slice(0, 80))
+        // Report candidate type to server for diagnostics
+        if (socketRef.current) socketRef.current.emit('debug', { msg: `ice-candidate: #${candidateCount} type=${e.candidate.type} ${e.candidate.protocol || ''} ${e.candidate.address || ''}` })
         if (socketRef.current) socketRef.current.emit('ice-candidate', {
           targetId: remotePeerId,
           targetUsername: remotePeerNameRef.current || undefined,
@@ -481,10 +483,12 @@ function useWebRTC() {
         })
       } else {
         console.log(`[Sylvid] ICE gathering complete — ${candidateCount} candidates gathered`)
+        if (socketRef.current) socketRef.current.emit('debug', { msg: `ice-gathering-complete: ${candidateCount} candidates` })
       }
     }
     pc.oniceconnectionstatechange = () => {
       console.log('[Sylvid] ICE connection state:', pc.iceConnectionState)
+      if (socketRef.current) socketRef.current.emit('debug', { msg: `ice-state: ${pc.iceConnectionState}` })
       // Android WebView sometimes doesn't fire connectionstatechange — use ICE state as fallback
       if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
         clearDisconnectGraceTimer()
@@ -528,6 +532,7 @@ function useWebRTC() {
     }
     pc.onconnectionstatechange = () => {
       console.log('[Sylvid] Connection state:', pc.connectionState)
+      if (socketRef.current) socketRef.current.emit('debug', { msg: `connection-state: ${pc.connectionState}` })
       if (pc.connectionState === 'connected') {
         clearDisconnectGraceTimer()
         clearConnectTimer(); setCallStatus('connected'); setIsInCall(true)

@@ -536,6 +536,12 @@ export async function POST(req: NextRequest) {
         await broadcastAdminSnapshot()
         break
       }
+
+      case 'debug': {
+        const peer = await getPeer(userId)
+        console.log(`[Sylvid] [DEBUG] ${peer?.username || userId.slice(0,8)}: ${data.msg}`)
+        break
+      }
     }
 
     if (stale && type !== 'register' && type !== 'admin-register') {
